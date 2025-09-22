@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Streamlit dashboard with a single shared password gate + "Last refreshed" indicator
+# Streamlit dashboard with a single shared password gate + robust "Last refreshed" indicator
 
 import os
 import sqlite3
@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# ---------- Page setup (must be first Streamlit call) ----------
+# ---------- Page setup ----------
 st.set_page_config(page_title="SAM.gov - Africa Opportunities", layout="wide")
 
 # ---------- DB path: prefer repo copy (for cloud), else local home copy ----------
@@ -20,7 +20,6 @@ def _rerun():
     try:
         st.rerun()
     except AttributeError:
-        # Older Streamlit versions
         st.experimental_rerun()
 
 # ---------- ONE-PASSWORD GATE ----------
@@ -36,13 +35,13 @@ def password_gate():
 
     if not secret_pw:
         st.warning("No app_password secret configured. Skipping password gate (dev mode).")
-        return  # allow through for local development
+        return
 
     if st.session_state.get("authed") is True:
         if st.sidebar.button("Lock"):
             st.session_state.authed = False
             _rerun()
-        return  # already authenticated
+        return
 
     st.title("🔒 Private Dashboard")
     st.markdown("Enter the access code to continue.")
@@ -74,9 +73,10 @@ def load_data():
     if "id" in df.columns:
         df = df.drop(columns=["id"])
 
-    # Parse PostedDate (safe)
+    # Create a parsed date helper column safely
     if "PostedDate" in df.columns:
-        df["PostedDate_parsed"] = pd.to_datetime(df["PostedDate"], errors="coerce", infer_datetime_format=True)
+        s = pd.to_datetime(df["PostedDate"], errors="coerce", utc=True)
+        df["PostedDate_parsed"] = s
     else:
         df["PostedDate_parsed"] = pd.NaT
 
@@ -84,22 +84,20 @@ def load_data():
 
 # ---------- Main UI ----------
 def main():
-    password_gate()  # require the shared password
+    password_gate()
 
     st.title("SAM.gov — Contract Opportunities (African countries)")
 
     df = load_data()
 
-    # ---- Last refreshed indicator (NEW) ----
-    if not df.empty and "PostedDate" in df.columns:
-        last_dt = pd.to_datetime(df["PostedDate"], errors="coerce").max()
-        # Display a friendly timestamp; falls back if NaT
-        if pd.notna(last_dt):
-            st.caption(f"Last updated (max PostedDate in DB): {last_dt}")
-        else:
-            st.caption("Last updated: (could not parse PostedDate)")
+    # ---- Last refreshed indicator (ROBUST) ----
+    if "PostedDate_parsed" in df.columns and df["PostedDate_parsed"].notna().any():
+        last_dt = df["PostedDate_parsed"].dropna().max()
+        st.caption(f"Last updated (max PostedDate in DB): {last_dt}")
+    elif "PostedDate" in df.columns:
+        st.caption("Last updated: (no valid PostedDate values in DB)")
     else:
-        st.caption("Last updated: (no data yet)")
+        st.caption("Last updated: (no PostedDate column)")
 
     if df.empty:
         st.info(
@@ -109,7 +107,6 @@ def main():
         )
         return
 
-    # Sidebar filters
     st.sidebar.header("Filters")
 
     pop_vals = sorted([v for v in df.get("PopCountry", pd.Series([], dtype=str)).dropna().unique().tolist() if str(v).strip()])
@@ -123,7 +120,6 @@ def main():
 
     q = st.sidebar.text_input("Full-text search (Title, Description, Awardee)")
 
-    # Apply filters
     filtered = df.copy()
 
     if selected_pops:
@@ -151,11 +147,10 @@ def main():
         filtered = filtered[filtered["PostedDate_parsed"].notna()]
         filtered = filtered[filtered["PostedDate_parsed"] <= pd.to_datetime(to_date)]
 
-    st.write(f"Results: {len(filtered)} rows")
+    st.write(f"Results: {len(filtered)} rows)")
     show_df = filtered.drop(columns=["PostedDate_parsed"], errors="ignore")
     st.dataframe(show_df, use_container_width=True)
 
-    # Export
     csv_bytes = show_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download results as CSV", data=csv_bytes, file_name="sam_africa_results.csv", mime="text/csv")
 
