@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
-# Streamlit dashboard with a simple single-password gate (compatible with all Streamlit versions)
+# Streamlit dashboard with a single shared password gate + "Last refreshed" indicator
 
 import os
 import sqlite3
 from pathlib import Path
-from datetime import datetime
-
 import pandas as pd
 import streamlit as st
 
-# --- Page setup (must be first Streamlit call) ---
+# ---------- Page setup (must be first Streamlit call) ----------
 st.set_page_config(page_title="SAM.gov - Africa Opportunities", layout="wide")
 
-# --- DB path: prefer repo copy (for cloud), else local home copy ---
+# ---------- DB path: prefer repo copy (for cloud), else local home copy ----------
 REPO_DB = Path(__file__).parent / "data" / "opportunities.db"
 HOME_DB = Path.home() / "sam_africa_data" / "opportunities.db"
 DB_PATH = REPO_DB if REPO_DB.exists() else HOME_DB
 
-# --- Rerun helper (works on new and old Streamlit) ---
+# ---------- Rerun helper (new & old Streamlit compatibility) ----------
 def _rerun():
     try:
         st.rerun()
     except AttributeError:
-        # for older versions
+        # Older Streamlit versions
         st.experimental_rerun()
 
-# --- ONE-PASSWORD GATE ---
+# ---------- ONE-PASSWORD GATE ----------
 def password_gate():
     """
     Require a single shared password before showing the app.
-    Reads the secret from (in order): st.secrets["app_password"] or env APP_PASSWORD.
-    Stores auth in session_state so users don't have to re-enter on every interaction.
+    Reads the secret from st.secrets['app_password'] or env APP_PASSWORD.
+    Stores auth in session_state so users don't re-enter on every interaction.
     """
     secret_pw = st.secrets.get("app_password") if hasattr(st, "secrets") else None
     if not secret_pw:
@@ -38,7 +36,7 @@ def password_gate():
 
     if not secret_pw:
         st.warning("No app_password secret configured. Skipping password gate (dev mode).")
-        return  # show the app
+        return  # allow through for local development
 
     if st.session_state.get("authed") is True:
         if st.sidebar.button("Lock"):
@@ -62,6 +60,7 @@ def password_gate():
     else:
         st.stop()
 
+# ---------- Data load ----------
 @st.cache_data(ttl=60)
 def load_data():
     if not DB_PATH.exists():
@@ -71,19 +70,36 @@ def load_data():
         df = pd.read_sql_query("SELECT * FROM opportunities ORDER BY PostedDate DESC", conn)
     finally:
         conn.close()
+
     if "id" in df.columns:
         df = df.drop(columns=["id"])
+
+    # Parse PostedDate (safe)
     if "PostedDate" in df.columns:
         df["PostedDate_parsed"] = pd.to_datetime(df["PostedDate"], errors="coerce", infer_datetime_format=True)
     else:
         df["PostedDate_parsed"] = pd.NaT
+
     return df
 
+# ---------- Main UI ----------
 def main():
     password_gate()  # require the shared password
 
     st.title("SAM.gov — Contract Opportunities (African countries)")
+
     df = load_data()
+
+    # ---- Last refreshed indicator (NEW) ----
+    if not df.empty and "PostedDate" in df.columns:
+        last_dt = pd.to_datetime(df["PostedDate"], errors="coerce").max()
+        # Display a friendly timestamp; falls back if NaT
+        if pd.notna(last_dt):
+            st.caption(f"Last updated (max PostedDate in DB): {last_dt}")
+        else:
+            st.caption("Last updated: (could not parse PostedDate)")
+    else:
+        st.caption("Last updated: (no data yet)")
 
     if df.empty:
         st.info(
@@ -93,6 +109,7 @@ def main():
         )
         return
 
+    # Sidebar filters
     st.sidebar.header("Filters")
 
     pop_vals = sorted([v for v in df.get("PopCountry", pd.Series([], dtype=str)).dropna().unique().tolist() if str(v).strip()])
@@ -106,6 +123,7 @@ def main():
 
     q = st.sidebar.text_input("Full-text search (Title, Description, Awardee)")
 
+    # Apply filters
     filtered = df.copy()
 
     if selected_pops:
@@ -137,6 +155,7 @@ def main():
     show_df = filtered.drop(columns=["PostedDate_parsed"], errors="ignore")
     st.dataframe(show_df, use_container_width=True)
 
+    # Export
     csv_bytes = show_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download results as CSV", data=csv_bytes, file_name="sam_africa_results.csv", mime="text/csv")
 
