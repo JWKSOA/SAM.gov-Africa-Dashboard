@@ -1,0 +1,8 @@
+Downloading CSV from: https://sam.gov/api/prod/fileextractservices/v1/api/download/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public
+Saved CSV to /var/folders/g7/rl56lbj978vbkl1z20xw80_c0000gn/T/tmp5uodf0q6/ContractOpportunitiesFullCSV.csv
+Moved to /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_22_2025.csv
+Reading CSV in chunks with encoding=utf-8, errors=replace ...
+Found 206 rows that reference African countries.
+Inserted 2 new rows into DB.
+Deleted old CSV: /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_18_2025.csv
+Done.
