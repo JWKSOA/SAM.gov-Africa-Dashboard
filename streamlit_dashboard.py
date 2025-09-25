@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Streamlit Cloud–safe dashboard that reads data/opportunities.db committed by your GitHub Action.
-# Fixes StreamlitDuplicateElementId by assigning unique keys to ALL widgets (button/form/charts/grids/expanders).
+# Fixes:
+#  - StreamlitDuplicateElementId by assigning unique keys to widgets (buttons, form, charts, grids, expanders).
+#  - Removes key= from st.metric (metric does NOT support key) to avoid TypeError.
 # Keeps your UX: password gate, Award$+, SecondaryContact*, NaN→blank, Excel-like filters, row drawer, SAM link copy,
 # tabs with normalized date filtering, ISO-3 maps, and "New Opportunities Added" metric.
 
@@ -396,7 +398,7 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
 def main():
     password_gate()
 
-    st.title("SAM.gov — Contract Opportunities (African countries)", anchor=False)
+    st.title("SAM.gov — Contract Opportunities (African countries)")
 
     df = load_data()
 
@@ -418,15 +420,15 @@ def main():
     c1, c2 = st.columns([1,1])
     with c1:
         if df["PostedDate_parsed"].notna().any():
-            st.metric("Last Updated", str(df["PostedDate_parsed"].dropna().max().date()), key="metric_last_updated")
+            st.metric("Last Updated", str(df["PostedDate_parsed"].dropna().max().date()))
         else:
-            st.metric("Last Updated", "(unknown)", key="metric_last_updated")
+            st.metric("Last Updated", "(unknown)")
     with c2:
-        st.metric("New Contract Opportunities Added", new_count, key="metric_new")
+        st.metric("New Contract Opportunities Added", new_count)
 
     st.divider()
 
-    # Tabs (unique slugs used as keys)
+    # Tabs (unique slugs used as keys for charts/grids)
     today_norm     = pd.Timestamp.today().normalize()
     five_years_ago = today_norm - pd.DateOffset(years=5)
     tab_names = ["Last 7 Days","Last 30 Days","Last 365 Days","Last 5 Years","Archive (5+ Years)"]
