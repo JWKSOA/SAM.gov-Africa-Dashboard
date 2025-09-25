@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # Streamlit Cloud–safe dashboard that reads data/opportunities.db committed by your GitHub Action.
-# Password gate removed. Keeps: GitHub Action "Fetch latest" trigger, Archive diagnostics, heat maps,
-# agency×country COUNT tables, Excel-like filters (AG Grid), row details drawer, copy SAM link,
-# normalized time filtering, and "New Opportunities Added" metric.
+# Password gate removed previously. This version removes invalid key= on expander/plotly_chart and anchor= on subheader,
+# and makes per-tab button labels unique to avoid duplicate element IDs without keys.
 
 import os
 import json
@@ -253,7 +252,7 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
         st.info("No data in this date range yet.")
         return
 
-    # Choropleths (kept)
+    # Choropleths (kept) — NOTE: st.plotly_chart has no key parameter
     left, right = st.columns(2)
     with left:
         m = df_page.dropna(subset=["PopCountry_iso3"]).groupby("PopCountry_iso3").size().reset_index(name="opps")
@@ -262,7 +261,7 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
                                 color="opps", color_continuous_scale="Plasma",
                                 title="By PopCountry")
             fig.update_geos(scope="africa", showcountries=True)
-            st.plotly_chart(fig, use_container_width=True, key=f"fig_pop_{tab_key}")
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning("No mappable PopCountry values.")
     with right:
@@ -272,7 +271,7 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
                                  color="opps", color_continuous_scale="Viridis",
                                  title="By CountryCode")
             fig2.update_geos(scope="africa", showcountries=True)
-            st.plotly_chart(fig2, use_container_width=True, key=f"fig_cc_{tab_key}")
+            st.plotly_chart(fig2, use_container_width=True)
         else:
             st.warning("No mappable CountryCode values.")
 
@@ -312,6 +311,7 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
     if "_AwardAmountNumeric" in work.columns:
         gb.configure_column("_AwardAmountNumeric", hide=True)
 
+    # Remove key from AgGrid to avoid unsupported-arg errors
     grid = AgGrid(
         work[display_cols],
         gridOptions=gb.build(),
@@ -321,7 +321,6 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
         allow_unsafe_jscode=False,
-        key=f"grid_{tab_key}",
     )
 
     raw_sel = grid.get("selected_rows", [])
@@ -337,7 +336,7 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
     if len(rows) > 0:
         row = rows[0]
         st.divider()
-        st.subheader("Row details", anchor=False)
+        st.subheader("Row details")  # removed anchor=
 
         sam_link = ""
         for c in ("SAM Link","SAM_Link","Link","URL","NoticeLink"):
@@ -345,18 +344,20 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
             if sam_link:
                 break
 
+        # Make button labels unique per tab to avoid duplicate IDs without keys
         c1, c2, _ = st.columns([1,1,6])
         with c1:
-            st.link_button("Open SAM Link", sam_link or "#", disabled=not bool(sam_link), key=f"btn_open_{tab_key}")
+            st.link_button(f"Open SAM Link ({tab_key})", sam_link or "#", disabled=not bool(sam_link))
         with c2:
-            if st.button("Copy SAM Link", key=f"btn_copy_{tab_key}"):
+            if st.button(f"Copy SAM Link ({tab_key})"):
                 if sam_link:
                     streamlit_js_eval(jsCode=f"navigator.clipboard.writeText('{sam_link}')")
                     st.success("Copied link to clipboard.", icon="✅")
                 else:
                     st.warning("No link available in this row.")
 
-        with st.expander("Full Description", expanded=True, key=f"exp_desc_{tab_key}"):
+        # Row description expander — NO key here
+        with st.expander("Full Description", expanded=True):
             desc_val = None
             for cand in ("Description","FullDescription","Summary","DescriptionText","opportunity_description"):
                 if cand in work.columns:
@@ -364,6 +365,7 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
                     if desc_val: break
             st.write(desc_val or "(No description text in this row)")
 
+        # All fields
         st.markdown("**All fields**")
         other = {}
         for c in work.columns:
@@ -385,9 +387,11 @@ def main():
     st.title("SAM.gov — Contract Opportunities (African countries)")
 
     # Toolbar: user-triggered refresh via GitHub API (Cloud-safe)
-    with st.expander("Data controls", expanded=False, key="exp_controls"):
+    # NOTE: st.expander does NOT accept key=. Removed.
+    with st.expander("Data controls", expanded=False):
         st.caption("Trigger a GitHub Action run to fetch the latest SAM.gov data and push an updated database to the repo.")
-        if st.button("🔁 Fetch latest data (GitHub Action)", key="btn_trigger_action"):
+        if st.button("🔁 Fetch latest data (GitHub Action)"):
+            # call workflow_dispatch; Streamlit will not block until data arrives
             trigger_github_workflow(ref="main")
 
     df = load_data()
@@ -420,7 +424,7 @@ def main():
 
     st.divider()
 
-    # Tabs (unique slugs used as keys for charts/grids)
+    # Tabs (unique slugs used to make labels unique)
     today_norm     = pd.Timestamp.today().normalize()
     five_years_ago = today_norm - pd.DateOffset(years=5)
 
@@ -441,7 +445,6 @@ def main():
         with tab:
             if start is None:
                 df_page = df[ts.notna() & (ts < end)].copy()
-                # Helpful diagnostic if Archive is empty
                 if df_page.empty:
                     earliest = df["PostedDate_parsed"].dropna().min()
                     st.warning(
