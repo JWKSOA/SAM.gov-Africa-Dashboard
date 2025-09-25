@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # Streamlit Cloud–safe dashboard that reads data/opportunities.db committed by your GitHub Action.
-# Fixes:
-#  - StreamlitDuplicateElementId by assigning unique keys to widgets (buttons, form, charts, grids, expanders).
-#  - Removes key= from st.metric (metric does NOT support key) to avoid TypeError.
-# Keeps your UX: password gate, Award$+, SecondaryContact*, NaN→blank, Excel-like filters, row drawer, SAM link copy,
-# tabs with normalized date filtering, ISO-3 maps, and "New Opportunities Added" metric.
+# Password gate removed. Keeps: GitHub Action "Fetch latest" trigger, Archive diagnostics, heat maps,
+# agency×country COUNT tables, Excel-like filters (AG Grid), row details drawer, copy SAM link,
+# normalized time filtering, and "New Opportunities Added" metric.
 
 import os
 import json
@@ -15,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 
 # --- ensure libs (no-ops on Cloud if already present) ---
@@ -52,42 +51,15 @@ STATE_DIR = (REPO_DB.parent if REPO_DB.exists() else HOME_DB.parent)
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 SNAPSHOT_PATH = STATE_DIR / ".last_ids.json"
 
-# ---------- Password gate with unique keys ----------
-def password_gate():
-    secret_pw = st.secrets.get("app_password") if hasattr(st, "secrets") else None
-    if not secret_pw:
-        secret_pw = os.environ.get("APP_PASSWORD")
-
-    if not secret_pw:
-        st.warning("No app_password configured. Skipping password gate (dev mode).")
-        return
-
-    # If already authenticated, show a keyed lock button once
-    if st.session_state.get("authed") is True:
-        if st.sidebar.button("Lock", key="sidebar_btn_lock"):
-            st.session_state.authed = False
-            try: st.rerun()
-            except Exception: st.experimental_rerun()
-        return
-
-    st.title("🔒 Private Dashboard")
-    st.markdown("Enter the access code to continue.")
-
-    # Give the form and input explicit keys
-    with st.form(key="form_login", clear_on_submit=False):
-        code = st.text_input("Access code", type="password", key="input_access_code")
-        submit = st.form_submit_button("Enter", key="btn_login_submit")
-
-    if submit:
-        if code == secret_pw:
-            st.session_state.authed = True
-            try: st.rerun()
-            except Exception: st.experimental_rerun()
-        else:
-            st.error("Incorrect code.")
-            st.stop()
-    else:
-        st.stop()
+# ---------- GitHub Action trigger (set these in Streamlit secrets) ----------
+#   github_owner = "JWKSOA"
+#   github_repo  = "SAM.gov-Africa-Dashboard"
+#   github_workflow_filename = "update-sam-db.yml"
+#   github_token = "<PAT with workflow scope>"
+GH_OWNER   = st.secrets.get("github_owner", "JWKSOA")
+GH_REPO    = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
+GH_WF_FILE = st.secrets.get("github_workflow_filename", "update-sam-db.yml")
+GH_TOKEN   = st.secrets.get("github_token", "")
 
 # ---------- Helpers ----------
 MONEY_RX = re.compile(r"\$|,|\s")
@@ -174,6 +146,32 @@ def add_copy_link_column(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     df["Copy SAM Link"] = "Copy"
     return df, link_col
 
+# ---------- GitHub Action trigger ----------
+def trigger_github_workflow(ref: str = "main") -> bool:
+    """Trigger the workflow_dispatch of your nightly updater."""
+    if not GH_TOKEN:
+        st.error("Missing github_token in Streamlit secrets. Cannot trigger refresh.")
+        return False
+    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/actions/workflows/{GH_WF_FILE}/dispatches"
+    headers = {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    payload = {"ref": ref}
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        if r.status_code in (201, 204):
+            st.success("Refresh requested. The GitHub Action will update the DB and push to the repo.")
+            st.caption("Give it a few minutes, then click 'Rerun' in the app.")
+            return True
+        else:
+            st.error(f"GitHub API error {r.status_code}: {r.text}")
+            return False
+    except Exception as e:
+        st.error(f"Failed to call GitHub API: {e}")
+        return False
+
 # ---------- Load from SQLite ----------
 @st.cache_data(ttl=60)
 def load_data() -> pd.DataFrame:
@@ -255,6 +253,7 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
         st.info("No data in this date range yet.")
         return
 
+    # Choropleths (kept)
     left, right = st.columns(2)
     with left:
         m = df_page.dropna(subset=["PopCountry_iso3"]).groupby("PopCountry_iso3").size().reset_index(name="opps")
@@ -277,44 +276,31 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
         else:
             st.warning("No mappable CountryCode values.")
 
-    left2, right2 = st.columns(2)
-    with left2:
-        col = "Department/Ind.Agency"
-        if col in df_page.columns:
-            counts = df_page[col].replace({"": "(blank)"}).value_counts().reset_index()
-            counts.columns = [col, "count"]
-            top_n = 12
-            if len(counts) > top_n:
-                top = counts.iloc[:top_n]
-                other = counts.iloc[top_n:]["count"].sum()
-                counts = pd.concat([top, pd.DataFrame({col:["Other"], "count":[other]})], ignore_index=True)
-            fig3 = px.pie(counts, values="count", names=col, title="% Breakdown of Top US Agencies")
-            st.plotly_chart(fig3, use_container_width=True, key=f"fig_agency_{tab_key}")
-        else:
-            st.warning("Column 'Department/Ind.Agency' not found.")
-    with right2:
+    # Agency × Country COUNT tables (instead of % heatmap)
+    st.markdown("### Agency × Country (counts)")
+    ctab1, ctab2 = st.columns(2)
+    with ctab1:
         if {"Department/Ind.Agency","PopCountry"}.issubset(df_page.columns):
-            pivot = (df_page.assign(count=1)
-                            .pivot_table(index="PopCountry", columns="Department/Ind.Agency",
-                                         values="count", aggfunc="sum", fill_value=0))
-            if not pivot.empty:
-                pct = pivot.div(pivot.sum(axis=1).replace(0, np.nan), axis=0) * 100
-                pct = pct.fillna(0).sort_index()
-                fig4 = px.imshow(pct, aspect="auto",
-                                 labels=dict(x="Agency", y="Country", color="% of Opps"),
-                                 title="Agency → Country % Breakdown (per country)")
-                st.plotly_chart(fig4, use_container_width=True, key=f"fig_heat_{tab_key}")
-            else:
-                st.warning("Not enough data for country/agency matrix.")
+            cnt = (df_page.assign(count=1)
+                          .pivot_table(index="PopCountry", columns="Department/Ind.Agency",
+                                       values="count", aggfunc="sum", fill_value=0))
+            st.dataframe(cnt.sort_index(), use_container_width=True)
         else:
-            st.warning("Need both 'Department/Ind.Agency' and 'PopCountry' columns.")
+            st.info("Need columns: Department/Ind.Agency and PopCountry.")
+    with ctab2:
+        if {"Department/Ind.Agency","CountryCode"}.issubset(df_page.columns):
+            cnt2 = (df_page.assign(count=1)
+                           .pivot_table(index="CountryCode", columns="Department/Ind.Agency",
+                                        values="count", aggfunc="sum", fill_value=0))
+            st.dataframe(cnt2.sort_index(), use_container_width=True)
+        else:
+            st.info("Need columns: Department/Ind.Agency and CountryCode.")
 
 # ---------- Grid (compact + details drawer + Excel filters) ----------
 COMPACT_COL_ORDER = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Copy SAM Link"]
 
 def render_grid(df_page: pd.DataFrame, tab_key: str):
     work = df_page.copy()
-
     for c in COMPACT_COL_ORDER:
         if c not in work.columns:
             work[c] = ""
@@ -396,12 +382,17 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
 
 # ---------- Main ----------
 def main():
-    password_gate()
-
     st.title("SAM.gov — Contract Opportunities (African countries)")
+
+    # Toolbar: user-triggered refresh via GitHub API (Cloud-safe)
+    with st.expander("Data controls", expanded=False, key="exp_controls"):
+        st.caption("Trigger a GitHub Action run to fetch the latest SAM.gov data and push an updated database to the repo.")
+        if st.button("🔁 Fetch latest data (GitHub Action)", key="btn_trigger_action"):
+            trigger_github_workflow(ref="main")
 
     df = load_data()
 
+    # Last updated metric
     if df.get("PostedDate_parsed") is not None and df["PostedDate_parsed"].notna().any():
         last_dt = df["PostedDate_parsed"].dropna().max()
         st.caption(f"Last updated (max PostedDate in DB): {last_dt}")
@@ -412,6 +403,7 @@ def main():
         st.error("No data loaded. Ensure your nightly GitHub Action wrote data/opportunities.db to the repo.")
         return
 
+    # New items metric
     current_ids = _current_ids(df)
     prev_ids    = _load_previous_ids()
     new_count   = len(current_ids - prev_ids) if prev_ids else len(current_ids)
@@ -431,6 +423,7 @@ def main():
     # Tabs (unique slugs used as keys for charts/grids)
     today_norm     = pd.Timestamp.today().normalize()
     five_years_ago = today_norm - pd.DateOffset(years=5)
+
     tab_names = ["Last 7 Days","Last 30 Days","Last 365 Days","Last 5 Years","Archive (5+ Years)"]
     tab_slugs = ["7d","30d","365d","5y","arch"]
     tabs = st.tabs(tab_names)
@@ -440,7 +433,7 @@ def main():
         (today_norm - pd.Timedelta(days=30),  today_norm + pd.Timedelta(days=1)),
         (today_norm - pd.Timedelta(days=365), today_norm + pd.Timedelta(days=1)),
         (five_years_ago,                       today_norm + pd.Timedelta(days=1)),
-        (None,                                  five_years_ago),                   # archive
+        (None,                                  five_years_ago),                   # archive: < five_years_ago
     ]
 
     ts = df["PostedDate_norm"]
@@ -448,8 +441,17 @@ def main():
         with tab:
             if start is None:
                 df_page = df[ts.notna() & (ts < end)].copy()
+                # Helpful diagnostic if Archive is empty
+                if df_page.empty:
+                    earliest = df["PostedDate_parsed"].dropna().min()
+                    st.warning(
+                        "No rows in Archive (5+ Years). "
+                        "This usually means the deployed database has no entries older than 5 years.\n\n"
+                        f"Earliest PostedDate in DB: **{earliest}**"
+                    )
             else:
                 df_page = df[ts.notna() & (ts >= start) & (ts < end)].copy()
+
             render_visuals(df_page, tab_key=slug)
             st.divider()
             render_grid(df_page, tab_key=slug)
