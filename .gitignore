@@ -2,3 +2,7 @@
 .streamlit/
 __pycache__/
 *.pyc
+# Large raw extracts — never commit
+data/*.csv
+data/*.zip
+data/*.gz

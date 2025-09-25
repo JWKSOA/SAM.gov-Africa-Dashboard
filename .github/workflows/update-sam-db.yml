@@ -75,6 +75,10 @@ jobs:
           con.close()
           print("Indexes created and VACUUM complete.")
           PY
+      - name: Remove raw CSVs before commit (prevent 100MB push)
+        run: |
+          rm -f data/ContractOpportunitiesFullCSV_*.csv
+          rm -f data/*.csv
 
       # Commit & push if anything changed (typically the DB)
       - name: Commit & push DB updates

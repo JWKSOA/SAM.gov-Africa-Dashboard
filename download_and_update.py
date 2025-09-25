@@ -27,6 +27,9 @@ import pandas as pd
 
 from africa_countries import AFRICA_NAMES, AFRICA_ISO3
 
+CI_MODE = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+
+
 # ---------- Config ----------
 PRIMARY_CSV_URL = (
     "https://sam.gov/api/prod/fileextractservices/v1/api/download/"
@@ -323,11 +326,9 @@ def main():
     ensure_db()
 
     csv_url = resolve_csv_url()
-
     today = datetime.date.today()
-    fname = f"ContractOpportunitiesFullCSV_{today.strftime('%m_%d_%Y')}.csv"
-    dest = LOCAL_DATA_DIR / fname
 
+    # Always work in a temp file to avoid large artifacts in the repo
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / CSV_FILENAME_BASE
         try:
@@ -335,33 +336,37 @@ def main():
         except Exception as e:
             print("Failed to download CSV:", e)
             sys.exit(1)
-        shutil.move(str(tmp), dest)
-        print(f"Moved to {dest}")
 
-    total_matched = 0
-    total_inserted = 0
+        total_matched = 0
+        total_inserted = 0
 
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        try:
+            for chunk in iter_csv_chunks(tmp):
+                matched = filter_african_rows(chunk)
+                if matched.empty:
+                    continue
+                matched = ensure_notice_id_column(matched)
+                inserted = insert_new_rows_chunk(cur, matched)
+                total_matched += len(matched)
+                total_inserted += inserted
+            conn.commit()
+        finally:
+            conn.close()
 
-    try:
-        for chunk in iter_csv_chunks(dest):
-            matched = filter_african_rows(chunk)
-            if matched.empty:
-                continue
-            matched = ensure_notice_id_column(matched)
-            inserted = insert_new_rows_chunk(cur, matched)
-            total_matched += len(matched)
-            total_inserted += inserted
-        conn.commit()
-    finally:
-        conn.close()
+        print(f"Found {total_matched} rows that reference African countries.")
+        print(f"Inserted {total_inserted} new rows into DB.")
 
-    print(f"Found {total_matched} rows that reference African countries.")
-    print(f"Inserted {total_inserted} new rows into DB.")
+        # In CI (GitHub Actions), DO NOT persist the raw CSV in the repo
+        if CI_MODE:
+            print("CI mode: not saving the daily CSV to the repo.")
+        else:
+            # Local dev convenience: keep a dated CSV in ~/sam_africa_data (not the repo)
+            dest = LOCAL_DATA_DIR / f"ContractOpportunitiesFullCSV_{today.strftime('%m_%d_%Y')}.csv"
+            shutil.copyfile(tmp, dest)
+            cleanup_old_csvs(dest)
+            print(f"Saved a copy locally at {dest} (not committed to git).")
 
-    cleanup_old_csvs(dest)
     print("Done.")
 
-if __name__ == "__main__":
-    main()
