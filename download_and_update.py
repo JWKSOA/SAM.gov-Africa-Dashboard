@@ -37,8 +37,12 @@ FALLBACK_CSV_URL = (
 )
 
 CSV_FILENAME_BASE = "ContractOpportunitiesFullCSV.csv"
-LOCAL_DATA_DIR = Path.home() / "sam_africa_data"
+
+# NEW: allow override of local storage via SAM_DATA_DIR (used in CI)
+SAM_DATA_DIR = os.environ.get("SAM_DATA_DIR")
+LOCAL_DATA_DIR = Path(SAM_DATA_DIR).expanduser().resolve() if SAM_DATA_DIR else (Path.home() / "sam_africa_data")
 DB_PATH = LOCAL_DATA_DIR / "opportunities.db"
+
 
 # Columns to keep in DB (NoticeID handled separately; we write our own)
 KEEP_COLUMNS = [
