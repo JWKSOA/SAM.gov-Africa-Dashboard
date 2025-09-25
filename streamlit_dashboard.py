@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Streamlit dashboard with a single shared password gate + "Last refreshed" indicator
+# DB-driven Streamlit dashboard using your existing SQLite pipeline (no CSV assumption).
+# Implements:
+#  1) Auto-run bootstrap_historical.py once at startup (no button).
+#  2) Auto-run download_and_update.py every 24 hours without user action.
+#  3) Fix/avoid SettingWithCopyWarning; work on .copy() and suppress pandas warning AG Grid triggers.
+#  4) Remove “stale” gating; always load data after auto-runs.
+#  5) Keep all UX features you asked for: Award$+, SecondaryContact*, NaN→blank,
+#     Excel-style filters (AG Grid), row details drawer, Copy SAM Link,
+#     Tabs (7/30/365/5y/Archive>5y) using normalized Timestamps, ISO-3 maps,
+#     “New Opportunities Added” metric, and your password gate.
 
 import os
 import sys
@@ -15,7 +24,29 @@ import numpy as np
 import plotly.express as px
 import streamlit as st
 
-# ---------- Page setup (must be first Streamlit call) ----------
+# --- Safe auto-install guards (local convenience only) ---
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+except ModuleNotFoundError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit-aggrid>=0.3.5"])
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+
+try:
+    from streamlit_js_eval import streamlit_js_eval
+except ModuleNotFoundError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit-js-eval>=0.1.7"])
+    from streamlit_js_eval import streamlit_js_eval
+
+try:
+    import pycountry
+except ModuleNotFoundError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pycountry>=22.3.5"])
+    import pycountry
+
+# Silence pandas SettingWithCopy warnings (AG Grid causes these internally)
+warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
+
+# ---------- Page setup ----------
 st.set_page_config(page_title="SAM.gov - Africa Opportunities", layout="wide")
 
 # ---------- DB path: prefer repo copy (for cloud), else local home copy ----------
@@ -64,13 +95,14 @@ def password_gate():
         secret_pw = os.environ.get("APP_PASSWORD")
 
     if not secret_pw:
-        st.warning("No app_password secret configured. Skipping password gate (dev mode).")
-        return  # allow through for local development
+        st.warning("No app_password configured. Skipping password gate (dev mode).")
+        return
 
     if st.session_state.get("authed") is True:
         if st.sidebar.button("Lock"):
             st.session_state.authed = False
             _rerun()
+        return
         return
 
     st.title("🔒 Private Dashboard")
@@ -188,9 +220,11 @@ def load_data() -> pd.DataFrame:
     if "id" in df.columns:
         df = df.drop(columns=["id"])
 
-    # Parse PostedDate (safe)
+    # Parse PostedDate to tz-aware UTC, then create normalized naive Timestamps for filtering
     if "PostedDate" in df.columns:
-        df["PostedDate_parsed"] = pd.to_datetime(df["PostedDate"], errors="coerce", infer_datetime_format=True)
+        ts = pd.to_datetime(df["PostedDate"], errors="coerce", utc=True)
+        df["PostedDate_parsed"] = ts
+        df["PostedDate_norm"]   = ts.dt.tz_convert(None).dt.normalize()
     else:
         df["PostedDate_parsed"] = pd.NaT
         df["PostedDate_norm"]   = pd.NaT
@@ -418,6 +452,7 @@ def ensure_daily_update():
 # ---------- Main UI ----------
 def main():
     password_gate()
+    password_gate()
 
     st.title("SAM.gov — Contract Opportunities (African countries)")
 
@@ -430,70 +465,61 @@ def main():
     # Load data from DB (after auto-runs)
     df = load_data()
 
-    # ---- Last refreshed indicator (NEW) ----
-    if not df.empty and "PostedDate" in df.columns:
-        last_dt = pd.to_datetime(df["PostedDate"], errors="coerce").max()
-        # Display a friendly timestamp; falls back if NaT
-        if pd.notna(last_dt):
-            st.caption(f"Last updated (max PostedDate in DB): {last_dt}")
-        else:
-            st.caption("Last updated: (could not parse PostedDate)")
+    # Last updated (from DB content)
+    if df.get("PostedDate_parsed") is not None and df["PostedDate_parsed"].notna().any():
+        last_dt = df["PostedDate_parsed"].dropna().max()
+        st.caption(f"Last updated (max PostedDate in DB): {last_dt}")
     else:
-        st.caption("Last updated: (no data yet)")
+        last_dt = None
+        st.caption("Last updated: unknown")
 
     if df.empty:
         st.error("No data loaded from the database yet. Please check your loader scripts.")
         return
 
-    # Sidebar filters
-    st.sidebar.header("Filters")
+    # New Opportunities Added
+    current_ids = _current_ids(df)
+    prev_ids    = _load_previous_ids()
+    new_count   = len(current_ids - prev_ids) if prev_ids else len(current_ids)
+    _save_current_ids(current_ids)
 
-    pop_vals = sorted([v for v in df.get("PopCountry", pd.Series([], dtype=str)).dropna().unique().tolist() if str(v).strip()])
-    cc_vals  = sorted([v for v in df.get("CountryCode", pd.Series([], dtype=str)).dropna().unique().tolist() if str(v).strip()])
+    colA, colB = st.columns([1,1])
+    with colA:
+        if df["PostedDate_parsed"].notna().any():
+            st.metric("Last Updated", str(df["PostedDate_parsed"].dropna().max().date()))
+        else:
+            st.metric("Last Updated", "(unknown)")
+    with colB:
+        st.metric("New Contract Opportunities Added", new_count)
 
-    selected_pops = st.sidebar.multiselect("Filter PopCountry (contains)", pop_vals)
-    selected_cc   = st.sidebar.multiselect("Filter CountryCode (exact)", cc_vals)
+    st.divider()
 
-    from_date = st.sidebar.date_input("From date (optional)", value=None)
-    to_date   = st.sidebar.date_input("To date (optional)",   value=None)
+    # Date-range tabs using normalized Timestamps
+    today_norm    = pd.Timestamp.today().normalize()
+    five_years_ago = today_norm - pd.DateOffset(years=5)
 
-    q = st.sidebar.text_input("Full-text search (Title, Description, Awardee)")
+    tabs = st.tabs(["Last 7 Days","Last 30 Days","Last 365 Days","Last 5 Years","Archive (5+ Years)"])
+    # Half-open windows [start, end)
+    windows = [
+        (today_norm - pd.Timedelta(days=7),   today_norm + pd.Timedelta(days=1)),
+        (today_norm - pd.Timedelta(days=30),  today_norm + pd.Timedelta(days=1)),
+        (today_norm - pd.Timedelta(days=365), today_norm + pd.Timedelta(days=1)),
+        (five_years_ago,                      today_norm + pd.Timedelta(days=1)),
+        (None,                                five_years_ago),  # Archive: < five_years_ago
+    ]
 
-    # Apply filters
-    filtered = df.copy()
+    ts = df["PostedDate_norm"]
+    for tab, (start, end) in zip(tabs, windows):
+        with tab:
+            if start is None:
+                df_page = df[ts.notna() & (ts < end)].copy()
+            else:
+                df_page = df[ts.notna() & (ts >= start) & (ts < end)].copy()
+            render_visuals(df_page)
+            st.divider()
+            render_grid(df_page)
 
-    if selected_pops:
-        lowered = [sp.lower() for sp in selected_pops]
-        filtered = filtered[filtered["PopCountry"].astype(str).str.lower().apply(lambda x: any(sp in x for sp in lowered))]
-
-    if selected_cc:
-        filtered = filtered[filtered["CountryCode"].astype(str).isin(selected_cc)]
-
-    if q:
-        ql = q.lower()
-        filtered = filtered[
-            filtered.apply(
-                lambda r: (ql in str(r.get("Title","")).lower())
-                          or (ql in str(r.get("Description","")).lower())
-                          or (ql in str(r.get("Awardee","")).lower()),
-                axis=1
-            )
-        ]
-
-    if from_date:
-        filtered = filtered[filtered["PostedDate_parsed"].notna()]
-        filtered = filtered[filtered["PostedDate_parsed"] >= pd.to_datetime(from_date)]
-    if to_date:
-        filtered = filtered[filtered["PostedDate_parsed"].notna()]
-        filtered = filtered[filtered["PostedDate_parsed"] <= pd.to_datetime(to_date)]
-
-    st.write(f"Results: {len(filtered)} rows")
-    show_df = filtered.drop(columns=["PostedDate_parsed"], errors="ignore")
-    st.dataframe(show_df, use_container_width=True)
-
-    # Export
-    csv_bytes = show_df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download results as CSV", data=csv_bytes, file_name="sam_africa_results.csv", mime="text/csv")
+    st.caption("Tip: Use the column filter icons in the table header to filter by Contains / Equals / Does not contain, like Excel/Sheets.")
 
 if __name__ == "__main__":
     main()
