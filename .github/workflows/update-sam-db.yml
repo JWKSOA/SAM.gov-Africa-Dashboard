@@ -22,6 +22,7 @@ jobs:
     env:
       # Tell BOTH scripts to write the DB into the repo's data/ folder
       SAM_DATA_DIR: ${{ github.workspace }}/data
+      GITHUB_ACTIONS: "true"
 
     steps:
       - name: Checkout repo
@@ -43,20 +44,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Historical backfill:
-      # Run if DB doesn't exist OR user explicitly requested it via workflow_dispatch input.
+      # Historical backfill: run if DB doesn't exist OR user explicitly requested it
       - name: Bootstrap historical (first run or when requested)
         if: ${{ hashFiles('data/opportunities.db') == '' || github.event.inputs.run_bootstrap == 'true' }}
         run: |
-          echo "Bootstrapping historical data..."
+          echo "Bootstrapping historical data…"
           python bootstrap_historical.py
 
       - name: Daily refresh (always)
         run: |
           python download_and_update.py
 
-      # DB maintenance: add helpful indexes + VACUUM
-      - name: Optimize SQLite (indexes + vacuum)
+      # DB maintenance: add helpful indexes + PRAGMA optimize + VACUUM
+      - name: Optimize SQLite (indexes + optimize + vacuum)
         run: |
           python - <<'PY'
           import sqlite3, os
@@ -65,20 +65,24 @@ jobs:
               raise SystemExit("DB not found after loaders.")
           con = sqlite3.connect(db)
           cur = con.cursor()
-          # Helpful indexes (id is already PK and "NoticeID" is UNIQUE via your scripts)
+          # Helpful indexes (id is PK and NoticeID is UNIQUE via scripts)
           cur.execute('CREATE INDEX IF NOT EXISTS idx_opps_posteddate ON opportunities ("PostedDate")')
           cur.execute('CREATE INDEX IF NOT EXISTS idx_opps_popcountry ON opportunities ("PopCountry")')
           cur.execute('CREATE INDEX IF NOT EXISTS idx_opps_countrycode ON opportunities ("CountryCode")')
           cur.execute('CREATE INDEX IF NOT EXISTS idx_opps_agency ON opportunities ("Department/Ind.Agency")')
           con.commit()
-          cur.execute('VACUUM')
+          cur.execute('PRAGMA optimize;')
+          cur.execute('VACUUM;')
+          con.commit()
           con.close()
-          print("Indexes created and VACUUM complete.")
+          print("Indexes created; optimize + VACUUM complete.")
           PY
-      - name: Remove raw CSVs before commit (prevent 100MB push)
+
+      # Defensive cleanup: make sure no raw CSVs remain before committing
+      - name: Remove raw CSVs before commit
         run: |
-          rm -f data/ContractOpportunitiesFullCSV_*.csv
-          rm -f data/*.csv
+          rm -f data/ContractOpportunitiesFullCSV_*.csv || true
+          rm -f data/*.csv || true
 
       # Commit & push if anything changed (typically the DB)
       - name: Commit & push DB updates

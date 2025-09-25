@@ -6,3 +6,20 @@ __pycache__/
 data/*.csv
 data/*.zip
 data/*.gz
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter / temp
+.ipynb_checkpoints/
+*.tmp
+*.temp
+
+# Large raw extracts — never commit
+data/*.csv
+data/*.zip
+data/*.gz
+
+# OS/editor noise
+.DS_Store
+.vscode/

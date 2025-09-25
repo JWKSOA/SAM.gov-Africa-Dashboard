@@ -4,11 +4,13 @@ download_and_update.py
 
 Daily job to:
 - Download ContractOpportunitiesFullCSV.csv from SAM endpoints (no page scrape).
-- Save as ContractOpportunitiesFullCSV_MM_DD_YYYY.csv
-- Read CSV in memory-friendly chunks with tolerant encodings.
+- Stream ingest in chunks (tolerant encodings).
 - Filter rows for African countries (PopCountry or CountryCode).
-- Insert only NEW IDs into SQLite (~/sam_africa_data/opportunities.db).
-- Delete previous CSVs in ~/sam_africa_data to save space.
+- Insert only NEW NoticeIDs into SQLite.
+- In CI (GitHub Actions), DO NOT persist raw CSVs to the repo (avoid >100MB pushes).
+- Locally, optionally keep a dated CSV in ~/sam_africa_data (never the repo).
+
+This script honors SAM_DATA_DIR for DB location (set to $GITHUB_WORKSPACE/data in CI).
 """
 
 import os
@@ -18,7 +20,6 @@ import datetime
 import tempfile
 import shutil
 import re
-import hashlib
 from pathlib import Path
 from time import sleep
 
@@ -26,9 +27,6 @@ import requests
 import pandas as pd
 
 from africa_countries import AFRICA_NAMES, AFRICA_ISO3
-
-CI_MODE = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
-
 
 # ---------- Config ----------
 PRIMARY_CSV_URL = (
@@ -41,38 +39,15 @@ FALLBACK_CSV_URL = (
 
 CSV_FILENAME_BASE = "ContractOpportunitiesFullCSV.csv"
 
-# NEW: allow override of local storage via SAM_DATA_DIR (used in CI)
 SAM_DATA_DIR = os.environ.get("SAM_DATA_DIR")
 LOCAL_DATA_DIR = Path(SAM_DATA_DIR).expanduser().resolve() if SAM_DATA_DIR else (Path.home() / "sam_africa_data")
 DB_PATH = LOCAL_DATA_DIR / "opportunities.db"
 
-
-# Columns to keep in DB (NoticeID handled separately; we write our own)
-KEEP_COLUMNS = [
-    "Title",
-    "Department/Ind.Agency",
-    "Sub-Tier",
-    "Office",
-    "PostedDate",
-    "Type",
-    "PopCountry",
-    "AwardNumber",
-    "AwardDate",
-    "Award$",
-    "Awardee",
-    "PrimaryContactTitle",
-    "PrimaryContactFullName",
-    "PrimaryContactEmail",
-    "PrimaryContactPhone",
-    "OrganizationType",
-    "CountryCode",
-    "Link",
-    "Description",
-]
-
-CHUNK_SIZE = 50000  # rows per chunk when streaming the CSV
-
+CHUNK_SIZE = 50_000  # rows per chunk when streaming the CSV
 LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Detect CI
+CI_MODE = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 
 # ---------- Small utils ----------
 def norm(s: str) -> str:
@@ -81,46 +56,12 @@ def norm(s: str) -> str:
 
 # Common historical variants that can serve as a unique ID column
 ID_CANDIDATES_NORM = {
-    "noticeid",
-    "noticeidnumber",
-    "noticeidno",
-    "noticeid_",
-    "noticeidnumber_",
-    "noticeidno_",
-    "noticeidnumberfbo",
-    "noticeidfboplus",
-    "noticeidfboplus_",
-    "noticeidfboplusnumber",
-    "noticeidfboplusno",
-    "noticeidfboplusnumber_",
-    "noticeidfboplusno_",
-    "noticeidfboplusnumberfbo",
-    "noticeidfboplusnumberfbo_",
-    "noticeidfboplusfbo_",
-    "noticeidfboplusfbo",  # (being very permissive to catch odd exports)
-    "noticeidfboplusid",
-    "noticeidfboplusid_",
-    "noticeidfboplusidnumber",
-    "noticeidfboplusidno",
-
-    "noticeidwithspaces",  # placeholder to catch "Notice ID"
-    "noticeidwithdash",    # "Notice-ID"
-
-    "noticeidlegacy",
-    "opportunityid",
-    "opportunityidentifier",
-    "documentid",
-    "documentidentifier",
-    "solicitationnumber",
-    "solicitationid",
-    "solnumber",
-    "refid",
-    "referenceid",
-    "referencenumber",
+    "noticeid","noticeidnumber","noticeidno","documentid","solicitationnumber",
+    "solicitationid","opportunityid","referencenumber","referenceid","refid","solnumber",
 }
 
 # ---------- Net helpers ----------
-def robust_get(url, *, stream=False, timeout=120, max_retries=3, backoff=3):
+def robust_get(url, *, stream=False, timeout=300, max_retries=3, backoff=3):
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -146,41 +87,68 @@ def resolve_csv_url():
     except Exception:
         return FALLBACK_CSV_URL
 
-def download_csv(url, dest_path):
+def download_csv(url, dest_path: Path):
     print(f"Downloading CSV from: {url}")
     r = robust_get(url, stream=True, timeout=300, max_retries=3)
     with open(dest_path, "wb") as f:
         shutil.copyfileobj(r.raw, f)
-    print(f"Saved CSV to {dest_path}")
+    print(f"Saved CSV to temp: {dest_path}")
 
 # ---------- DB ----------
 def ensure_db():
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    keep_defs = ",\n        ".join([f"\"{c}\" TEXT" for c in KEEP_COLUMNS])
-    cur.execute(f"""
-    CREATE TABLE IF NOT EXISTS opportunities (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        "NoticeID" TEXT UNIQUE,
-        {keep_defs}
-    )
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        # performance pragmas
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA synchronous=OFF;")
+        cur.execute("PRAGMA temp_store=MEMORY;")
+        # table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS opportunities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            "NoticeID" TEXT UNIQUE,
+            "Title" TEXT,
+            "Department/Ind.Agency" TEXT,
+            "Sub-Tier" TEXT,
+            "Office" TEXT,
+            "PostedDate" TEXT,
+            "Type" TEXT,
+            "PopCountry" TEXT,
+            "AwardNumber" TEXT,
+            "AwardDate" TEXT,
+            "Award$" TEXT,
+            "Awardee" TEXT,
+            "PrimaryContactTitle" TEXT,
+            "PrimaryContactFullName" TEXT,
+            "PrimaryContactEmail" TEXT,
+            "PrimaryContactPhone" TEXT,
+            "OrganizationType" TEXT,
+            "CountryCode" TEXT,
+            "Link" TEXT,
+            "Description" TEXT
+        )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
 
 def insert_new_rows_chunk(cur, df_chunk) -> int:
+    keep_cols = [
+        "Title","Department/Ind.Agency","Sub-Tier","Office","PostedDate","Type","PopCountry",
+        "AwardNumber","AwardDate","Award$","Awardee","PrimaryContactTitle","PrimaryContactFullName",
+        "PrimaryContactEmail","PrimaryContactPhone","OrganizationType","CountryCode","Link","Description",
+    ]
     # Ensure kept columns exist
-    for c in KEEP_COLUMNS:
+    for c in keep_cols:
         if c not in df_chunk.columns:
             df_chunk[c] = None
-
-    # Ensure NoticeID exists (already computed below)
     if "NoticeID" not in df_chunk.columns:
         df_chunk["NoticeID"] = None
 
     df_chunk["NoticeID"] = df_chunk["NoticeID"].astype(str)
 
-    cols_for_insert = ['"NoticeID"'] + [f'"{c}"' for c in KEEP_COLUMNS]
+    cols_for_insert = ['"NoticeID"'] + [f'"{c}"' for c in keep_cols]
     placeholders = ", ".join(["?"] * len(cols_for_insert))
     columns_sql = ", ".join(cols_for_insert)
     sql = f"INSERT INTO opportunities ({columns_sql}) VALUES ({placeholders})"
@@ -190,7 +158,7 @@ def insert_new_rows_chunk(cur, df_chunk) -> int:
         nid = (row.get("NoticeID") or "").strip()
         if not nid or nid.lower() == "nan":
             continue
-        vals = [nid] + [str(row.get(c) or "") for c in KEEP_COLUMNS]
+        vals = [nid] + [str(row.get(c) or "") for c in keep_cols]
         try:
             cur.execute(sql, vals)
             inserted += 1
@@ -225,44 +193,15 @@ def filter_african_rows(df):
 
 # ---------- NoticeID detection / synthesis ----------
 def ensure_notice_id_column(df):
-    """
-    Create/normalize a 'NoticeID' column:
-    1) Try to find an existing identifier column among many historical variants.
-    2) If none, synthesize a stable surrogate hash from multiple fields.
-    """
     if "NoticeID" in df.columns:
         return df
-
-    # Build a map of normalized -> actual column name
     normalized_map = {norm(c): c for c in df.columns}
-
-    # direct lookups for common variants
-    preferred_order = [
-        "noticeid", "noticeidnumber", "noticeidno",
-        "noticeidwithspaces", "noticeidwithdash",
-        "documentid", "solicitationnumber", "solicitationid",
-        "opportunityid", "referencenumber", "referenceid", "refid", "solnumber",
-    ]
-
-    # Handle obvious textual variants
-    for k, v in list(normalized_map.items()):
-        if k in {"noticeid", "noticeidnumber", "noticeidno", "documentid",
-                 "solicitationnumber", "solicitationid", "opportunityid",
-                 "referencenumber", "referenceid", "refid", "solnumber"}:
-            df["NoticeID"] = df[v].astype(str)
+    for key, actual in normalized_map.items():
+        if key in ID_CANDIDATES_NORM or "noticeid" in key or "documentid" in key or "opportunityid" in key:
+            df["NoticeID"] = df[actual].astype(str)
             return df
-
-    # Try looser matches: anything that reduces to "noticeid" style
-    for k, v in normalized_map.items():
-        if "noticeid" in k or "documentid" in k or "opportunityid" in k:
-            df["NoticeID"] = df[v].astype(str)
-            return df
-        if k in ID_CANDIDATES_NORM:
-            df["NoticeID"] = df[v].astype(str)
-            return df
-        # "notice id" with space becomes "noticeid" after norm; already covered.
-
-    # Fallback: synthesize a deterministic surrogate ID from stable fields
+    # Fallback: synthesize from stable fields
+    import hashlib
     def make_hash(row):
         parts = [
             str(row.get("Title") or ""),
@@ -273,16 +212,13 @@ def ensure_notice_id_column(df):
             str(row.get("CountryCode") or ""),
             str(row.get("PopCountry") or ""),
         ]
-        s = "|".join(parts).strip()
-        if not s:
-            s = str(row.to_dict())  # last resort
+        s = "|".join(parts).strip() or str(row.to_dict())
         return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:24]
-
     df["NoticeID"] = df.apply(make_hash, axis=1)
     return df
 
 # ---------- CSV streaming (chunked, tolerant) ----------
-def iter_csv_chunks(path):
+def iter_csv_chunks(path: Path):
     enc_trials = [
         ("utf-8", "replace"),
         ("utf-8-sig", "strict"),
@@ -312,23 +248,13 @@ def iter_csv_chunks(path):
             continue
     raise last_err
 
-def cleanup_old_csvs(except_path):
-    for p in LOCAL_DATA_DIR.glob("ContractOpportunitiesFullCSV_*.csv"):
-        if p.resolve() != except_path.resolve():
-            try:
-                p.unlink()
-                print(f"Deleted old CSV: {p}")
-            except Exception as e:
-                print(f"Could not delete {p}: {e}")
-
-# ---------- Main ----------
 def main():
     ensure_db()
 
     csv_url = resolve_csv_url()
     today = datetime.date.today()
 
-    # Always work in a temp file to avoid large artifacts in the repo
+    # Always work in temp; never write CSV into the repo in CI
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / CSV_FILENAME_BASE
         try:
@@ -341,8 +267,8 @@ def main():
         total_inserted = 0
 
         conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
         try:
+            cur = conn.cursor()
             for chunk in iter_csv_chunks(tmp):
                 matched = filter_african_rows(chunk)
                 if matched.empty:
@@ -352,21 +278,25 @@ def main():
                 total_matched += len(matched)
                 total_inserted += inserted
             conn.commit()
+            # Small DB tune-up each run
+            cur.execute('PRAGMA optimize;')
+            cur.execute('VACUUM;')
+            conn.commit()
         finally:
             conn.close()
 
         print(f"Found {total_matched} rows that reference African countries.")
         print(f"Inserted {total_inserted} new rows into DB.")
 
-        # In CI (GitHub Actions), DO NOT persist the raw CSV in the repo
         if CI_MODE:
-            print("CI mode: not saving the daily CSV to the repo.")
+            print("CI mode: NOT saving the raw CSV in the repo.")
         else:
-            # Local dev convenience: keep a dated CSV in ~/sam_africa_data (not the repo)
+            # Local convenience: keep a dated CSV in ~/sam_africa_data (not in repo)
             dest = LOCAL_DATA_DIR / f"ContractOpportunitiesFullCSV_{today.strftime('%m_%d_%Y')}.csv"
             shutil.copyfile(tmp, dest)
-            cleanup_old_csvs(dest)
-            print(f"Saved a copy locally at {dest} (not committed to git).")
+            print(f"Saved a copy locally at {dest} (NOT committed to git).")
 
     print("Done.")
 
+if __name__ == "__main__":
+    main()
