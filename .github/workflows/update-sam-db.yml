@@ -5,7 +5,12 @@ on:
     # Around US midnight (covers DST with two UTC windows)
     - cron: "30 4 * * *"
     - cron: "30 5 * * *"
-  workflow_dispatch: {}  # allow manual Run
+  workflow_dispatch:
+    inputs:
+      run_bootstrap:
+        description: "Run historical bootstrap now"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -38,11 +43,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # One-time historical backfill if DB is missing in repo
-      - name: Bootstrap historical (first run only)
-        if: ${{ !exists('data/opportunities.db') }}
+      # Historical backfill:
+      # Run if DB doesn't exist OR user explicitly requested it via workflow_dispatch input.
+      - name: Bootstrap historical (first run or when requested)
+        if: ${{ hashFiles('data/opportunities.db') == '' || github.event.inputs.run_bootstrap == 'true' }}
         run: |
-          echo "No DB found; running bootstrap_historical.py..."
+          echo "Bootstrapping historical data..."
           python bootstrap_historical.py
 
       - name: Daily refresh (always)
