@@ -1,94 +1,56 @@
 #!/usr/bin/env python3
-# DB-driven Streamlit dashboard using your existing SQLite pipeline (no CSV assumption).
-# Implements:
-#  1) Auto-run bootstrap_historical.py once at startup (no button).
-#  2) Auto-run download_and_update.py every 24 hours without user action.
-#  3) Fix/avoid SettingWithCopyWarning; work on .copy() and suppress pandas warning AG Grid triggers.
-#  4) Remove “stale” gating; always load data after auto-runs.
-#  5) Keep all UX features you asked for: Award$+, SecondaryContact*, NaN→blank,
-#     Excel-style filters (AG Grid), row details drawer, Copy SAM Link,
-#     Tabs (7/30/365/5y/Archive>5y) using normalized Timestamps, ISO-3 maps,
-#     “New Opportunities Added” metric, and your password gate.
+# Streamlit Cloud–safe dashboard that reads data/opportunities.db committed by your GitHub Action.
+# Fixes StreamlitDuplicateElementId by assigning unique keys to ALL widgets (button/form/charts/grids/expanders).
+# Keeps your UX: password gate, Award$+, SecondaryContact*, NaN→blank, Excel-like filters, row drawer, SAM link copy,
+# tabs with normalized date filtering, ISO-3 maps, and "New Opportunities Added" metric.
 
 import os
-import sys
 import json
 import re
 import sqlite3
-import subprocess
-import warnings
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# --- Safe auto-install guards (local convenience only) ---
+# --- ensure libs (no-ops on Cloud if already present) ---
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 except ModuleNotFoundError:
+    import sys, subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit-aggrid>=0.3.5"])
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 try:
     from streamlit_js_eval import streamlit_js_eval
 except ModuleNotFoundError:
+    import sys, subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit-js-eval>=0.1.7"])
     from streamlit_js_eval import streamlit_js_eval
 
 try:
     import pycountry
 except ModuleNotFoundError:
+    import sys, subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pycountry>=22.3.5"])
     import pycountry
-
-# Silence pandas SettingWithCopy warnings (AG Grid causes these internally)
-warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 
 # ---------- Page setup ----------
 st.set_page_config(page_title="SAM.gov - Africa Opportunities", layout="wide")
 
-# ---------- DB path: prefer repo copy (for cloud), else local home copy ----------
+# ---------- DB path (Cloud prefers repo copy) ----------
 REPO_DB = Path(__file__).parent / "data" / "opportunities.db"
-HOME_DB  = Path.home() / "sam_africa_data" / "opportunities.db"
-DB_PATH  = REPO_DB if REPO_DB.exists() else HOME_DB
+HOME_DB = Path.home() / "sam_africa_data" / "opportunities.db"
+DB_PATH = REPO_DB if REPO_DB.exists() else HOME_DB
 
-# Scripts we call to populate/refresh data (your originals)
-DOWNLOAD_SCRIPT  = Path(__file__).parent / "download_and_update.py"
-BOOTSTRAP_SCRIPT = Path(__file__).parent / "bootstrap_historical.py"
-
-# Bookkeeping files to control auto-runs (kept alongside DB)
+# Snapshot file for "New Opportunities Added"
 STATE_DIR = (REPO_DB.parent if REPO_DB.exists() else HOME_DB.parent)
 STATE_DIR.mkdir(parents=True, exist_ok=True)
-BOOTSTRAP_FLAG  = STATE_DIR / ".historical_bootstrapped"       # presence means we've run bootstrap successfully
-LAST_REFRESH_TS = STATE_DIR / ".last_download_refresh_utc.txt" # ISO timestamp of last download_and_update run
-SNAPSHOT_PATH   = STATE_DIR / ".last_ids.json"                 # for “New Opportunities Added”
+SNAPSHOT_PATH = STATE_DIR / ".last_ids.json"
 
-# ---------- Shared helpers ----------
-def _rerun():
-    try:
-        st.rerun()
-    except AttributeError:
-        st.experimental_rerun()
-
-def _run_script(path: Path, label: str) -> bool:
-    """Run a Python script synchronously and show status. Returns True on success."""
-    if not path.exists():
-        st.warning(f"{label}: script not found at {path.name}.")
-        return False
-    try:
-        res = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
-        # Show last lines (helpful while not flooding the UI)
-        tail = (res.stdout or "").strip()
-        if tail:
-            st.caption(f"{label} log tail:\n{tail[-800:]}")
-        return True
-    except subprocess.CalledProcessError as e:
-        st.error(f"{label} failed.\n{e.stderr or e.stdout or e}")
-        return False
-
-# ---------- ONE-PASSWORD GATE (unchanged) ----------
+# ---------- Password gate with unique keys ----------
 def password_gate():
     secret_pw = st.secrets.get("app_password") if hasattr(st, "secrets") else None
     if not secret_pw:
@@ -98,31 +60,36 @@ def password_gate():
         st.warning("No app_password configured. Skipping password gate (dev mode).")
         return
 
+    # If already authenticated, show a keyed lock button once
     if st.session_state.get("authed") is True:
-        if st.sidebar.button("Lock"):
+        if st.sidebar.button("Lock", key="sidebar_btn_lock"):
             st.session_state.authed = False
-            _rerun()
-        return
+            try: st.rerun()
+            except Exception: st.experimental_rerun()
         return
 
     st.title("🔒 Private Dashboard")
     st.markdown("Enter the access code to continue.")
-    with st.form("login_form", clear_on_submit=False):
-        code = st.text_input("Access code", type="password")
-        submit = st.form_submit_button("Enter")
+
+    # Give the form and input explicit keys
+    with st.form(key="form_login", clear_on_submit=False):
+        code = st.text_input("Access code", type="password", key="input_access_code")
+        submit = st.form_submit_button("Enter", key="btn_login_submit")
+
     if submit:
         if code == secret_pw:
             st.session_state.authed = True
-            _rerun()
+            try: st.rerun()
+            except Exception: st.experimental_rerun()
         else:
             st.error("Incorrect code.")
             st.stop()
     else:
         st.stop()
 
-# ---------- Money parsing/formatting ----------
-MONEY_RX  = re.compile(r"\$|,|\s")
-SUFFIX_RX = re.compile(r"(?i)\s*([KMB])\b")  # K, M, B
+# ---------- Helpers ----------
+MONEY_RX = re.compile(r"\$|,|\s")
+SUFFIX_RX = re.compile(r"(?i)\s*([KMB])\b")
 
 def _parse_money_to_float(val):
     if val is None or (isinstance(val, float) and np.isnan(val)):
@@ -130,7 +97,8 @@ def _parse_money_to_float(val):
     s = str(val).strip()
     if not s:
         return None
-    m = SUFFIX_RX.search(s); mult = 1.0
+    m = SUFFIX_RX.search(s)
+    mult = 1.0
     if m:
         suf = m.group(1).upper()
         mult = 1e3 if suf == "K" else 1e6 if suf == "M" else 1e9 if suf == "B" else 1.0
@@ -147,7 +115,7 @@ def _format_currency(x: float) -> str:
 def _cleanup_nan(df: pd.DataFrame) -> pd.DataFrame:
     return df.replace({np.nan: ""})
 
-# ---------- Country code normalization (ISO-3 for maps) ----------
+# ISO-3 normalization for maps
 CC_OVERRIDES = {
     "Congo, Dem. Rep.": "COD",
     "Congo, Rep.": "COG",
@@ -176,7 +144,6 @@ def to_iso3(x: str) -> str | None:
     except Exception:
         return None
 
-# ---------- ID helpers ----------
 LIKELY_ID_COLS = [
     "NoticeID","NoticeId","Notice ID","NoticeNumber","Notice Number",
     "SolicitationNumber","SAMNoticeID","ID","uid","sam_id","Link","URL","NoticeLink"
@@ -205,7 +172,7 @@ def add_copy_link_column(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     df["Copy SAM Link"] = "Copy"
     return df, link_col
 
-# ---------- Data load from your DB (unchanged pipeline; enriched for UI) ----------
+# ---------- Load from SQLite ----------
 @st.cache_data(ttl=60)
 def load_data() -> pd.DataFrame:
     if not DB_PATH.exists():
@@ -213,14 +180,14 @@ def load_data() -> pd.DataFrame:
 
     conn = sqlite3.connect(DB_PATH)
     try:
-        df = pd.read_sql_query("SELECT * FROM opportunities ORDER BY PostedDate DESC", conn)
+        df = pd.read_sql_query('SELECT * FROM opportunities ORDER BY "PostedDate" DESC', conn)
     finally:
         conn.close()
 
     if "id" in df.columns:
         df = df.drop(columns=["id"])
 
-    # Parse PostedDate to tz-aware UTC, then create normalized naive Timestamps for filtering
+    # PostedDate parsed (UTC-aware) and normalized (naive midnight) for filtering
     if "PostedDate" in df.columns:
         ts = pd.to_datetime(df["PostedDate"], errors="coerce", utc=True)
         df["PostedDate_parsed"] = ts
@@ -255,7 +222,7 @@ def load_data() -> pd.DataFrame:
 
     return df
 
-# ---------- New items snapshot ----------
+# ---------- Snapshot for "New Opportunities Added" ----------
 def _load_previous_ids() -> set[str]:
     try:
         if SNAPSHOT_PATH.exists():
@@ -281,9 +248,10 @@ def _current_ids(df: pd.DataFrame) -> set[str]:
     return set(df[id_col].astype(str).tolist())
 
 # ---------- Visuals ----------
-def render_visuals(df_page: pd.DataFrame):
+def render_visuals(df_page: pd.DataFrame, tab_key: str):
     if df_page.empty:
-        st.info("No data in this date range yet."); return
+        st.info("No data in this date range yet.")
+        return
 
     left, right = st.columns(2)
     with left:
@@ -293,10 +261,9 @@ def render_visuals(df_page: pd.DataFrame):
                                 color="opps", color_continuous_scale="Plasma",
                                 title="By PopCountry")
             fig.update_geos(scope="africa", showcountries=True)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"fig_pop_{tab_key}")
         else:
             st.warning("No mappable PopCountry values.")
-
     with right:
         m2 = df_page.dropna(subset=["CountryCode_iso3"]).groupby("CountryCode_iso3").size().reset_index(name="opps")
         if not m2.empty:
@@ -304,7 +271,7 @@ def render_visuals(df_page: pd.DataFrame):
                                  color="opps", color_continuous_scale="Viridis",
                                  title="By CountryCode")
             fig2.update_geos(scope="africa", showcountries=True)
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True, key=f"fig_cc_{tab_key}")
         else:
             st.warning("No mappable CountryCode values.")
 
@@ -320,10 +287,9 @@ def render_visuals(df_page: pd.DataFrame):
                 other = counts.iloc[top_n:]["count"].sum()
                 counts = pd.concat([top, pd.DataFrame({col:["Other"], "count":[other]})], ignore_index=True)
             fig3 = px.pie(counts, values="count", names=col, title="% Breakdown of Top US Agencies")
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, use_container_width=True, key=f"fig_agency_{tab_key}")
         else:
             st.warning("Column 'Department/Ind.Agency' not found.")
-
     with right2:
         if {"Department/Ind.Agency","PopCountry"}.issubset(df_page.columns):
             pivot = (df_page.assign(count=1)
@@ -335,7 +301,7 @@ def render_visuals(df_page: pd.DataFrame):
                 fig4 = px.imshow(pct, aspect="auto",
                                  labels=dict(x="Agency", y="Country", color="% of Opps"),
                                  title="Agency → Country % Breakdown (per country)")
-                st.plotly_chart(fig4, use_container_width=True)
+                st.plotly_chart(fig4, use_container_width=True, key=f"fig_heat_{tab_key}")
             else:
                 st.warning("Not enough data for country/agency matrix.")
         else:
@@ -344,8 +310,9 @@ def render_visuals(df_page: pd.DataFrame):
 # ---------- Grid (compact + details drawer + Excel filters) ----------
 COMPACT_COL_ORDER = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Copy SAM Link"]
 
-def render_grid(df_page: pd.DataFrame):
-    work = df_page.copy()  # avoid SettingWithCopyWarning
+def render_grid(df_page: pd.DataFrame, tab_key: str):
+    work = df_page.copy()
+
     for c in COMPACT_COL_ORDER:
         if c not in work.columns:
             work[c] = ""
@@ -366,6 +333,7 @@ def render_grid(df_page: pd.DataFrame):
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
         allow_unsafe_jscode=False,
+        key=f"grid_{tab_key}",
     )
 
     raw_sel = grid.get("selected_rows", [])
@@ -381,7 +349,7 @@ def render_grid(df_page: pd.DataFrame):
     if len(rows) > 0:
         row = rows[0]
         st.divider()
-        st.subheader("Row details")
+        st.subheader("Row details", anchor=False)
 
         sam_link = ""
         for c in ("SAM Link","SAM_Link","Link","URL","NoticeLink"):
@@ -391,21 +359,21 @@ def render_grid(df_page: pd.DataFrame):
 
         c1, c2, _ = st.columns([1,1,6])
         with c1:
-            st.link_button("Open SAM Link", sam_link or "#", disabled=not bool(sam_link))
+            st.link_button("Open SAM Link", sam_link or "#", disabled=not bool(sam_link), key=f"btn_open_{tab_key}")
         with c2:
-            if st.button("Copy SAM Link"):
+            if st.button("Copy SAM Link", key=f"btn_copy_{tab_key}"):
                 if sam_link:
                     streamlit_js_eval(jsCode=f"navigator.clipboard.writeText('{sam_link}')")
-                    st.success("Copied link to clipboard.")
+                    st.success("Copied link to clipboard.", icon="✅")
                 else:
                     st.warning("No link available in this row.")
 
-        desc_val = None
-        for cand in ("Description","FullDescription","Summary","DescriptionText","opportunity_description"):
-            if cand in work.columns:
-                desc_val = row.get(cand, "")
-                if desc_val: break
-        with st.expander("Full Description", expanded=True):
+        with st.expander("Full Description", expanded=True, key=f"exp_desc_{tab_key}"):
+            desc_val = None
+            for cand in ("Description","FullDescription","Summary","DescriptionText","opportunity_description"):
+                if cand in work.columns:
+                    desc_val = row.get(cand, "")
+                    if desc_val: break
             st.write(desc_val or "(No description text in this row)")
 
         st.markdown("**All fields**")
@@ -414,7 +382,8 @@ def render_grid(df_page: pd.DataFrame):
             if c in ("PostedDate_parsed","PostedDate_norm","CountryCode_iso3","PopCountry_iso3","_AwardAmountNumeric"):
                 continue
             other[c] = row.get(c, "")
-        keys = list(other.keys()); mid = int(np.ceil(len(keys)/2)) if keys else 0
+        keys = list(other.keys())
+        mid = int(np.ceil(len(keys)/2)) if keys else 0
         colL, colR = st.columns(2)
         with colL:
             for k in keys[:mid]:
@@ -423,103 +392,67 @@ def render_grid(df_page: pd.DataFrame):
             for k in keys[mid:]:
                 st.markdown(f"**{k}:**  {other[k] if other[k] != '' else '(blank)'}")
 
-# ---------- Auto-run data loaders ----------
-def ensure_historical_loaded():
-    """Run bootstrap_historical.py exactly once (creates >5y archive)."""
-    if BOOTSTRAP_FLAG.exists():
-        return
-    st.info("Loading historical data (one-time)…")
-    ok = _run_script(BOOTSTRAP_SCRIPT, "Historical bootstrap")
-    if ok:
-        BOOTSTRAP_FLAG.write_text("done", encoding="utf-8")
-        st.cache_data.clear()
-
-def ensure_daily_update():
-    """Run download_and_update.py if last run is >= 24 hours ago."""
-    try:
-        last = pd.Timestamp(LAST_REFRESH_TS.read_text(encoding="utf-8")) if LAST_REFRESH_TS.exists() else None
-    except Exception:
-        last = None
-    now = pd.Timestamp.utcnow()
-    must_run = (last is None) or ((now - last) >= pd.Timedelta(hours=24))
-    if must_run:
-        st.info("Refreshing daily data…")
-        ok = _run_script(DOWNLOAD_SCRIPT, "Daily refresh")
-        if ok:
-            LAST_REFRESH_TS.write_text(now.isoformat(), encoding="utf-8")
-            st.cache_data.clear()
-
-# ---------- Main UI ----------
+# ---------- Main ----------
 def main():
     password_gate()
-    password_gate()
 
-    st.title("SAM.gov — Contract Opportunities (African countries)")
+    st.title("SAM.gov — Contract Opportunities (African countries)", anchor=False)
 
-    # 1) Historical data (one-time, at startup)
-    ensure_historical_loaded()
-
-    # 2) Daily refresh (every 24h, no user action)
-    ensure_daily_update()
-
-    # Load data from DB (after auto-runs)
     df = load_data()
 
-    # Last updated (from DB content)
     if df.get("PostedDate_parsed") is not None and df["PostedDate_parsed"].notna().any():
         last_dt = df["PostedDate_parsed"].dropna().max()
         st.caption(f"Last updated (max PostedDate in DB): {last_dt}")
     else:
-        last_dt = None
         st.caption("Last updated: unknown")
 
     if df.empty:
-        st.error("No data loaded from the database yet. Please check your loader scripts.")
+        st.error("No data loaded. Ensure your nightly GitHub Action wrote data/opportunities.db to the repo.")
         return
 
-    # New Opportunities Added
     current_ids = _current_ids(df)
     prev_ids    = _load_previous_ids()
     new_count   = len(current_ids - prev_ids) if prev_ids else len(current_ids)
     _save_current_ids(current_ids)
 
-    colA, colB = st.columns([1,1])
-    with colA:
+    c1, c2 = st.columns([1,1])
+    with c1:
         if df["PostedDate_parsed"].notna().any():
-            st.metric("Last Updated", str(df["PostedDate_parsed"].dropna().max().date()))
+            st.metric("Last Updated", str(df["PostedDate_parsed"].dropna().max().date()), key="metric_last_updated")
         else:
-            st.metric("Last Updated", "(unknown)")
-    with colB:
-        st.metric("New Contract Opportunities Added", new_count)
+            st.metric("Last Updated", "(unknown)", key="metric_last_updated")
+    with c2:
+        st.metric("New Contract Opportunities Added", new_count, key="metric_new")
 
     st.divider()
 
-    # Date-range tabs using normalized Timestamps
-    today_norm    = pd.Timestamp.today().normalize()
+    # Tabs (unique slugs used as keys)
+    today_norm     = pd.Timestamp.today().normalize()
     five_years_ago = today_norm - pd.DateOffset(years=5)
+    tab_names = ["Last 7 Days","Last 30 Days","Last 365 Days","Last 5 Years","Archive (5+ Years)"]
+    tab_slugs = ["7d","30d","365d","5y","arch"]
+    tabs = st.tabs(tab_names)
 
-    tabs = st.tabs(["Last 7 Days","Last 30 Days","Last 365 Days","Last 5 Years","Archive (5+ Years)"])
-    # Half-open windows [start, end)
     windows = [
-        (today_norm - pd.Timedelta(days=7),   today_norm + pd.Timedelta(days=1)),
+        (today_norm - pd.Timedelta(days=7),   today_norm + pd.Timedelta(days=1)),  # [start, end)
         (today_norm - pd.Timedelta(days=30),  today_norm + pd.Timedelta(days=1)),
         (today_norm - pd.Timedelta(days=365), today_norm + pd.Timedelta(days=1)),
-        (five_years_ago,                      today_norm + pd.Timedelta(days=1)),
-        (None,                                five_years_ago),  # Archive: < five_years_ago
+        (five_years_ago,                       today_norm + pd.Timedelta(days=1)),
+        (None,                                  five_years_ago),                   # archive
     ]
 
     ts = df["PostedDate_norm"]
-    for tab, (start, end) in zip(tabs, windows):
+    for tab, slug, (start, end) in zip(tabs, tab_slugs, windows):
         with tab:
             if start is None:
                 df_page = df[ts.notna() & (ts < end)].copy()
             else:
                 df_page = df[ts.notna() & (ts >= start) & (ts < end)].copy()
-            render_visuals(df_page)
+            render_visuals(df_page, tab_key=slug)
             st.divider()
-            render_grid(df_page)
+            render_grid(df_page, tab_key=slug)
 
-    st.caption("Tip: Use the column filter icons in the table header to filter by Contains / Equals / Does not contain, like Excel/Sheets.")
+    st.caption("Tip: use the header filter icons to search each column (Contains / Equals / etc.).")
 
 if __name__ == "__main__":
     main()
