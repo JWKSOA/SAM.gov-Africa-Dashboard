@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 """
-download_and_update.py
-
-Daily job to:
-- Download ContractOpportunitiesFullCSV.csv from SAM endpoints (no page scrape).
-- Stream ingest in chunks (tolerant encodings).
-- Filter rows for African countries (PopCountry or CountryCode).
-- Insert only NEW NoticeIDs into SQLite.
-- In CI (GitHub Actions), DO NOT persist raw CSVs to the repo (avoid >100MB pushes).
-- Locally, optionally keep a dated CSV in ~/sam_africa_data (never the repo).
-
-This script honors SAM_DATA_DIR for DB location (set to $GITHUB_WORKSPACE/data in CI).
+download_and_update.py - FIXED VERSION
+Daily job with proper country formatting and link preservation
 """
 
 import os
@@ -26,9 +17,84 @@ from time import sleep
 import requests
 import pandas as pd
 
-from africa_countries import AFRICA_NAMES, AFRICA_ISO3
+# Complete list of 54 African countries
+AFRICAN_COUNTRIES = {
+    "ALGERIA": "DZA", "ANGOLA": "AGO", "BENIN": "BEN", "BOTSWANA": "BWA",
+    "BURKINA FASO": "BFA", "BURUNDI": "BDI", "CABO VERDE": "CPV", "CAMEROON": "CMR",
+    "CENTRAL AFRICAN REPUBLIC": "CAF", "CHAD": "TCD", "COMOROS": "COM",
+    "CONGO": "COG", "DEMOCRATIC REPUBLIC OF THE CONGO": "COD", "DJIBOUTI": "DJI",
+    "EGYPT": "EGY", "EQUATORIAL GUINEA": "GNQ", "ERITREA": "ERI", "ESWATINI": "SWZ",
+    "ETHIOPIA": "ETH", "GABON": "GAB", "GAMBIA": "GMB", "GHANA": "GHA",
+    "GUINEA": "GIN", "GUINEA-BISSAU": "GNB", "IVORY COAST": "CIV", "KENYA": "KEN",
+    "LESOTHO": "LSO", "LIBERIA": "LBR", "LIBYA": "LBY", "MADAGASCAR": "MDG",
+    "MALAWI": "MWI", "MALI": "MLI", "MAURITANIA": "MRT", "MAURITIUS": "MUS",
+    "MOROCCO": "MAR", "MOZAMBIQUE": "MOZ", "NAMIBIA": "NAM", "NIGER": "NER",
+    "NIGERIA": "NGA", "RWANDA": "RWA", "SAO TOME AND PRINCIPE": "STP",
+    "SENEGAL": "SEN", "SEYCHELLES": "SYC", "SIERRA LEONE": "SLE", "SOMALIA": "SOM",
+    "SOUTH AFRICA": "ZAF", "SOUTH SUDAN": "SSD", "SUDAN": "SDN", "TANZANIA": "TZA",
+    "TOGO": "TGO", "TUNISIA": "TUN", "UGANDA": "UGA", "ZAMBIA": "ZMB", "ZIMBABWE": "ZWE"
+}
 
-# ---------- Config ----------
+# Mapping variations
+AFRICA_MAPPINGS = {
+    "algeria": "DZA", "dza": "DZA", "algérie": "DZA",
+    "angola": "AGO", "ago": "AGO",
+    "benin": "BEN", "ben": "BEN", "bénin": "BEN",
+    "botswana": "BWA", "bwa": "BWA",
+    "burkina faso": "BFA", "bfa": "BFA", "burkina": "BFA",
+    "burundi": "BDI", "bdi": "BDI",
+    "cabo verde": "CPV", "cpv": "CPV", "cape verde": "CPV",
+    "cameroon": "CMR", "cmr": "CMR", "cameroun": "CMR",
+    "central african republic": "CAF", "caf": "CAF", "car": "CAF",
+    "chad": "TCD", "tcd": "TCD", "tchad": "TCD",
+    "comoros": "COM", "com": "COM", "comores": "COM",
+    "congo": "COG", "cog": "COG", "congo-brazzaville": "COG", "republic of congo": "COG",
+    "democratic republic of the congo": "COD", "cod": "COD", "drc": "COD", "dr congo": "COD", "congo-kinshasa": "COD",
+    "djibouti": "DJI", "dji": "DJI",
+    "egypt": "EGY", "egy": "EGY",
+    "equatorial guinea": "GNQ", "gnq": "GNQ",
+    "eritrea": "ERI", "eri": "ERI",
+    "eswatini": "SWZ", "swz": "SWZ", "swaziland": "SWZ",
+    "ethiopia": "ETH", "eth": "ETH",
+    "gabon": "GAB", "gab": "GAB",
+    "gambia": "GMB", "gmb": "GMB", "the gambia": "GMB",
+    "ghana": "GHA", "gha": "GHA",
+    "guinea": "GIN", "gin": "GIN", "guinée": "GIN",
+    "guinea-bissau": "GNB", "gnb": "GNB", "guinea bissau": "GNB",
+    "ivory coast": "CIV", "civ": "CIV", "côte d'ivoire": "CIV", "cote d'ivoire": "CIV",
+    "kenya": "KEN", "ken": "KEN",
+    "lesotho": "LSO", "lso": "LSO",
+    "liberia": "LBR", "lbr": "LBR",
+    "libya": "LBY", "lby": "LBY",
+    "madagascar": "MDG", "mdg": "MDG",
+    "malawi": "MWI", "mwi": "MWI",
+    "mali": "MLI", "mli": "MLI",
+    "mauritania": "MRT", "mrt": "MRT",
+    "mauritius": "MUS", "mus": "MUS",
+    "morocco": "MAR", "mar": "MAR", "maroc": "MAR",
+    "mozambique": "MOZ", "moz": "MOZ",
+    "namibia": "NAM", "nam": "NAM",
+    "niger": "NER", "ner": "NER",
+    "nigeria": "NGA", "nga": "NGA",
+    "rwanda": "RWA", "rwa": "RWA",
+    "são tomé and príncipe": "STP", "stp": "STP", "sao tome and principe": "STP",
+    "senegal": "SEN", "sen": "SEN", "sénégal": "SEN",
+    "seychelles": "SYC", "syc": "SYC",
+    "sierra leone": "SLE", "sle": "SLE",
+    "somalia": "SOM", "som": "SOM",
+    "south africa": "ZAF", "zaf": "ZAF", "rsa": "ZAF",
+    "south sudan": "SSD", "ssd": "SSD",
+    "sudan": "SDN", "sdn": "SDN",
+    "tanzania": "TZA", "tza": "TZA",
+    "togo": "TGO", "tgo": "TGO",
+    "tunisia": "TUN", "tun": "TUN", "tunisie": "TUN",
+    "uganda": "UGA", "uga": "UGA",
+    "zambia": "ZMB", "zmb": "ZMB",
+    "zimbabwe": "ZWE", "zwe": "ZWE"
+}
+
+AFRICA_ISO3 = set(AFRICAN_COUNTRIES.values())
+
 PRIMARY_CSV_URL = (
     "https://sam.gov/api/prod/fileextractservices/v1/api/download/"
     "Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public"
@@ -37,30 +103,52 @@ FALLBACK_CSV_URL = (
     "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv"
 )
 
-CSV_FILENAME_BASE = "ContractOpportunitiesFullCSV.csv"
-
 SAM_DATA_DIR = os.environ.get("SAM_DATA_DIR")
 LOCAL_DATA_DIR = Path(SAM_DATA_DIR).expanduser().resolve() if SAM_DATA_DIR else (Path.home() / "sam_africa_data")
 DB_PATH = LOCAL_DATA_DIR / "opportunities.db"
 
-CHUNK_SIZE = 50_000  # rows per chunk when streaming the CSV
+CHUNK_SIZE = 50_000
 LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-# Detect CI
 CI_MODE = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 
-# ---------- Small utils ----------
 def norm(s: str) -> str:
-    """Normalize a column name: lowercase and strip non-alphanumerics."""
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
-# Common historical variants that can serve as a unique ID column
 ID_CANDIDATES_NORM = {
     "noticeid","noticeidnumber","noticeidno","documentid","solicitationnumber",
     "solicitationid","opportunityid","referencenumber","referenceid","refid","solnumber",
 }
 
-# ---------- Net helpers ----------
+def format_country_display(iso_code: str) -> str:
+    """Convert ISO3 to 'COUNTRY NAME (ISO3)' format"""
+    for country, code in AFRICAN_COUNTRIES.items():
+        if code == iso_code:
+            return f"{country} ({code})"
+    return iso_code
+
+def standardize_country_code(value: str) -> str:
+    """Convert any country name or code to 'COUNTRY NAME (ISO3)' format"""
+    if not value:
+        return value
+    
+    cleaned = str(value).strip().lower()
+    
+    # Check if already ISO code
+    if cleaned.upper() in AFRICA_ISO3:
+        return format_country_display(cleaned.upper())
+    
+    # Try to match against mappings
+    if cleaned in AFRICA_MAPPINGS:
+        iso_code = AFRICA_MAPPINGS[cleaned]
+        return format_country_display(iso_code)
+    
+    # Check partial matches
+    for mapping_key, iso_code in AFRICA_MAPPINGS.items():
+        if mapping_key in cleaned:
+            return format_country_display(iso_code)
+    
+    return value
+
 def robust_get(url, *, stream=False, timeout=300, max_retries=3, backoff=3):
     last_err = None
     for attempt in range(1, max_retries + 1):
@@ -94,16 +182,13 @@ def download_csv(url, dest_path: Path):
         shutil.copyfileobj(r.raw, f)
     print(f"Saved CSV to temp: {dest_path}")
 
-# ---------- DB ----------
 def ensure_db():
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
-        # performance pragmas
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=OFF;")
         cur.execute("PRAGMA temp_store=MEMORY;")
-        # table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS opportunities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,6 +224,13 @@ def insert_new_rows_chunk(cur, df_chunk) -> int:
         "AwardNumber","AwardDate","Award$","Awardee","PrimaryContactTitle","PrimaryContactFullName",
         "PrimaryContactEmail","PrimaryContactPhone","OrganizationType","CountryCode","Link","Description",
     ]
+    
+    # Standardize country codes to display format
+    if "PopCountry" in df_chunk.columns:
+        df_chunk["PopCountry"] = df_chunk["PopCountry"].apply(standardize_country_code)
+    if "CountryCode" in df_chunk.columns:
+        df_chunk["CountryCode"] = df_chunk["CountryCode"].apply(standardize_country_code)
+    
     # Ensure kept columns exist
     for c in keep_cols:
         if c not in df_chunk.columns:
@@ -166,32 +258,40 @@ def insert_new_rows_chunk(cur, df_chunk) -> int:
             continue
     return inserted
 
-# ---------- Africa filter ----------
 def filter_african_rows(df):
     for c in ("PopCountry", "CountryCode"):
         if c not in df.columns:
             df[c] = ""
+    
     def row_matches(row):
-        pop = str(row.get("PopCountry", "") or "")
-        cc = str(row.get("CountryCode", "") or "")
-        if cc.upper() in AFRICA_ISO3:
+        pop = str(row.get("PopCountry", "") or "").strip()
+        cc = str(row.get("CountryCode", "") or "").strip()
+        
+        pop_lower = pop.lower()
+        cc_lower = cc.lower()
+        
+        # Check ISO codes
+        if cc.upper() in AFRICA_ISO3 or pop.upper() in AFRICA_ISO3:
             return True
-        tokens = re.split(r'[,;/\|]', pop)
-        for t in tokens:
-            t_strip = t.strip()
-            if not t_strip:
-                continue
-            if t_strip.lower() in AFRICA_NAMES:
+        
+        # Check against all mappings
+        if pop_lower in AFRICA_MAPPINGS or cc_lower in AFRICA_MAPPINGS:
+            return True
+        
+        # Check partial matches
+        for country_variant in AFRICA_MAPPINGS.keys():
+            if country_variant in pop_lower or country_variant in cc_lower:
                 return True
-            if any(code in t_strip.upper() for code in AFRICA_ISO3):
+        
+        # Check ISO codes in text
+        for iso in AFRICA_ISO3:
+            if iso in pop.upper() or iso in cc.upper():
                 return True
-            for name in AFRICA_NAMES:
-                if name in t_strip.lower():
-                    return True
+        
         return False
+    
     return df[df.apply(row_matches, axis=1)].copy()
 
-# ---------- NoticeID detection / synthesis ----------
 def ensure_notice_id_column(df):
     if "NoticeID" in df.columns:
         return df
@@ -200,7 +300,6 @@ def ensure_notice_id_column(df):
         if key in ID_CANDIDATES_NORM or "noticeid" in key or "documentid" in key or "opportunityid" in key:
             df["NoticeID"] = df[actual].astype(str)
             return df
-    # Fallback: synthesize from stable fields
     import hashlib
     def make_hash(row):
         parts = [
@@ -217,7 +316,6 @@ def ensure_notice_id_column(df):
     df["NoticeID"] = df.apply(make_hash, axis=1)
     return df
 
-# ---------- CSV streaming (chunked, tolerant) ----------
 def iter_csv_chunks(path: Path):
     enc_trials = [
         ("utf-8", "replace"),
@@ -233,7 +331,7 @@ def iter_csv_chunks(path: Path):
                 path,
                 dtype=str,
                 encoding=enc,
-                encoding_errors=enc_err,  # pandas 2.x
+                encoding_errors=enc_err,
                 engine="python",
                 on_bad_lines="skip",
                 chunksize=CHUNK_SIZE,
@@ -254,9 +352,8 @@ def main():
     csv_url = resolve_csv_url()
     today = datetime.date.today()
 
-    # Always work in temp; never write CSV into the repo in CI
     with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td) / CSV_FILENAME_BASE
+        tmp = Path(td) / "ContractOpportunitiesFullCSV.csv"
         try:
             download_csv(csv_url, tmp)
         except Exception as e:
@@ -278,7 +375,6 @@ def main():
                 total_matched += len(matched)
                 total_inserted += inserted
             conn.commit()
-            # Small DB tune-up each run
             cur.execute('PRAGMA optimize;')
             cur.execute('VACUUM;')
             conn.commit()
@@ -291,7 +387,6 @@ def main():
         if CI_MODE:
             print("CI mode: NOT saving the raw CSV in the repo.")
         else:
-            # Local convenience: keep a dated CSV in ~/sam_africa_data (not in repo)
             dest = LOCAL_DATA_DIR / f"ContractOpportunitiesFullCSV_{today.strftime('%m_%d_%Y')}.csv"
             shutil.copyfile(tmp, dest)
             print(f"Saved a copy locally at {dest} (NOT committed to git).")

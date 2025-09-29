@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Fixed Streamlit dashboard with grid selection error resolved
+# Fixed Streamlit dashboard with proper links, country display, and filterable table
 
 import os
 import json
@@ -13,7 +13,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 
-# --- ensure libs (no-ops on Cloud if already present) ---
+# --- ensure libs ---
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 except ModuleNotFoundError:
@@ -38,12 +38,11 @@ except ModuleNotFoundError:
 # ---------- Page setup ----------
 st.set_page_config(page_title="SAM.gov - Africa Opportunities", layout="wide")
 
-# ---------- DB path (Cloud prefers repo copy) ----------
+# ---------- DB path ----------
 REPO_DB = Path(__file__).parent / "data" / "opportunities.db"
 HOME_DB = Path.home() / "sam_africa_data" / "opportunities.db"
 DB_PATH = REPO_DB if REPO_DB.exists() else HOME_DB
 
-# Snapshot file for "New Opportunities Added"
 STATE_DIR = (REPO_DB.parent if REPO_DB.exists() else HOME_DB.parent)
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 SNAPSHOT_PATH = STATE_DIR / ".last_ids.json"
@@ -53,6 +52,24 @@ GH_OWNER   = st.secrets.get("github_owner", "JWKSOA")
 GH_REPO    = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
 GH_WF_FILE = st.secrets.get("github_workflow_filename", "update-sam-db.yml")
 GH_TOKEN   = st.secrets.get("github_token", "")
+
+# ---------- African Countries Mapping ----------
+AFRICAN_COUNTRIES = {
+    "ALGERIA": "DZA", "ANGOLA": "AGO", "BENIN": "BEN", "BOTSWANA": "BWA",
+    "BURKINA FASO": "BFA", "BURUNDI": "BDI", "CABO VERDE": "CPV", "CAMEROON": "CMR",
+    "CENTRAL AFRICAN REPUBLIC": "CAF", "CHAD": "TCD", "COMOROS": "COM",
+    "CONGO": "COG", "DEMOCRATIC REPUBLIC OF THE CONGO": "COD", "DJIBOUTI": "DJI",
+    "EGYPT": "EGY", "EQUATORIAL GUINEA": "GNQ", "ERITREA": "ERI", "ESWATINI": "SWZ",
+    "ETHIOPIA": "ETH", "GABON": "GAB", "GAMBIA": "GMB", "GHANA": "GHA",
+    "GUINEA": "GIN", "GUINEA-BISSAU": "GNB", "IVORY COAST": "CIV", "KENYA": "KEN",
+    "LESOTHO": "LSO", "LIBERIA": "LBR", "LIBYA": "LBY", "MADAGASCAR": "MDG",
+    "MALAWI": "MWI", "MALI": "MLI", "MAURITANIA": "MRT", "MAURITIUS": "MUS",
+    "MOROCCO": "MAR", "MOZAMBIQUE": "MOZ", "NAMIBIA": "NAM", "NIGER": "NER",
+    "NIGERIA": "NGA", "RWANDA": "RWA", "SAO TOME AND PRINCIPE": "STP",
+    "SENEGAL": "SEN", "SEYCHELLES": "SYC", "SIERRA LEONE": "SLE", "SOMALIA": "SOM",
+    "SOUTH AFRICA": "ZAF", "SOUTH SUDAN": "SSD", "SUDAN": "SDN", "TANZANIA": "TZA",
+    "TOGO": "TGO", "TUNISIA": "TUN", "UGANDA": "UGA", "ZAMBIA": "ZMB", "ZIMBABWE": "ZWE"
+}
 
 # ---------- Helpers ----------
 MONEY_RX = re.compile(r"\$|,|\s")
@@ -82,94 +99,58 @@ def _format_currency(x: float) -> str:
 def _cleanup_nan(df: pd.DataFrame) -> pd.DataFrame:
     return df.replace({np.nan: ""})
 
-# ISO-3 normalization for maps
-CC_OVERRIDES = {
-    "Congo, Dem. Rep.": "COD",
-    "Congo, Rep.": "COG",
-    "Ivory Coast": "CIV",
-    "Eswatini": "SWZ",
-    "Cabo Verde": "CPV",
-    "The Gambia": "GMB",
-    "São Tomé and Príncipe": "STP",
-    "Sao Tome and Principe": "STP",
-    "Tanzania": "TZA",
-}
-def to_iso3(x: str) -> str | None:
-    if not x or not str(x).strip():
+def extract_iso3_from_display(value: str) -> str | None:
+    """Extract ISO3 code from 'COUNTRY NAME (ISO3)' format"""
+    if not value or not str(value).strip():
         return None
-    s = str(x).strip()
+    s = str(value).strip()
+    # Check if it's in our display format
+    match = re.search(r'\(([A-Z]{3})\)$', s)
+    if match:
+        return match.group(1)
+    # Check if it's just an ISO3 code
     if len(s) == 3 and s.isalpha():
         return s.upper()
-    if len(s) == 2 and s.isalpha():
-        c = pycountry.countries.get(alpha_2=s.upper())
-        return getattr(c, "alpha_3", None)
-    if s in CC_OVERRIDES:
-        return CC_OVERRIDES[s]
-    try:
-        c = pycountry.countries.lookup(s)
-        return c.alpha_3
-    except Exception:
-        return None
+    return None
 
 LIKELY_ID_COLS = [
     "NoticeID","NoticeId","Notice ID","NoticeNumber","Notice Number",
     "SolicitationNumber","SAMNoticeID","ID","uid","sam_id","Link","URL","NoticeLink"
 ]
+
 def _find_id_column(df: pd.DataFrame) -> str | None:
     for c in LIKELY_ID_COLS:
         if c in df.columns:
             return c
     return None
 
-def add_copy_link_column(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
-    """Ensure SAM links are properly formatted and add copy functionality."""
-    link_col = None
-    
-    # Find existing link column
-    for cand in ("Link", "SAM Link", "SAM_Link", "URL", "NoticeLink"):
-        if cand in df.columns:
-            link_col = cand
-            break
-    
-    # If no link column, try to construct from NoticeID
-    if link_col is None:
-        id_col = _find_id_column(df)
-        if id_col is not None:
-            def mk(row):
-                _id = str(row.get(id_col, "")).strip()
-                if _id and _id != "nan":
-                    return f"https://sam.gov/opp/{_id}/view"
-                return ""
-            df["SAM Link"] = df.apply(mk, axis=1)
-            link_col = "SAM Link"
-        else:
-            df["SAM Link"] = ""
-            link_col = "SAM Link"
-    
-    # Ensure links are properly formatted
-    if link_col in df.columns:
-        def fix_link(link):
+def ensure_proper_link(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure Link column contains proper SAM.gov URLs"""
+    if "Link" in df.columns:
+        def clean_link(link):
             if pd.isna(link) or not link:
                 return ""
             link = str(link).strip()
             if not link or link == "nan":
                 return ""
-            if link.startswith("http"):
+            # If it's already a full URL, keep it
+            if link.startswith("http://") or link.startswith("https://"):
                 return link
-            elif link.startswith("/opp/"):
+            # If it's a path, prepend sam.gov
+            if link.startswith("/opp/"):
                 return f"https://sam.gov{link}"
             elif link.startswith("opp/"):
                 return f"https://sam.gov/{link}"
             else:
+                # Assume it's a notice ID
                 return f"https://sam.gov/opp/{link}/view"
-        df[link_col] = df[link_col].apply(fix_link)
+        
+        df["Link"] = df["Link"].apply(clean_link)
     
-    df["Copy SAM Link"] = "Copy"
-    return df, link_col
+    return df
 
 # ---------- GitHub Action trigger ----------
 def trigger_github_workflow(ref: str = "main") -> bool:
-    """Trigger the workflow_dispatch of your nightly updater."""
     if not GH_TOKEN:
         st.error("Missing github_token in Streamlit secrets. Cannot trigger refresh.")
         return False
@@ -208,7 +189,10 @@ def load_data() -> pd.DataFrame:
     if "id" in df.columns:
         df = df.drop(columns=["id"])
 
-    # PostedDate parsed (UTC-aware) and normalized (naive midnight) for filtering
+    # Ensure proper links
+    df = ensure_proper_link(df)
+
+    # PostedDate parsing
     if "PostedDate" in df.columns:
         ts = pd.to_datetime(df["PostedDate"], errors="coerce", utc=True)
         df["PostedDate_parsed"] = ts
@@ -237,10 +221,9 @@ def load_data() -> pd.DataFrame:
     non_time = [c for c in df.columns if not c.startswith("PostedDate_")]
     df[non_time] = df[non_time].replace({np.nan: ""})
 
-    # SAM link & ISO codes for maps
-    df, _ = add_copy_link_column(df)
-    df["CountryCode_iso3"] = df.get("CountryCode", pd.Series([""]*len(df))).apply(to_iso3)
-    df["PopCountry_iso3"]  = df.get("PopCountry",  pd.Series([""]*len(df))).apply(to_iso3)
+    # Extract ISO3 codes for mapping
+    df["PopCountry_iso3"] = df.get("PopCountry", pd.Series([""]*len(df))).apply(extract_iso3_from_display)
+    df["CountryCode_iso3"] = df.get("CountryCode", pd.Series([""]*len(df))).apply(extract_iso3_from_display)
 
     return df
 
@@ -269,13 +252,13 @@ def _current_ids(df: pd.DataFrame) -> set[str]:
         return set((t + "|" + p).tolist())
     return set(df[id_col].astype(str).tolist())
 
-# ---------- Visuals (REMOVED CountryCode visualizations) ----------
+# ---------- Visuals with Filterable Table ----------
 def render_visuals(df_page: pd.DataFrame, tab_key: str):
     if df_page.empty:
         st.info("No data in this date range yet.")
         return
 
-    # Single choropleth for PopCountry only
+    # Choropleth for PopCountry
     st.subheader("Contract Distribution by Country")
     
     m = df_page.dropna(subset=["PopCountry_iso3"]).groupby("PopCountry_iso3").size().reset_index(name="opps")
@@ -288,30 +271,89 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
     else:
         st.warning("No mappable PopCountry values.")
 
-    # Single Agency × Country table (PopCountry only)
-    st.markdown("### Agency × Country Distribution")
+    # FILTERABLE Agency × Country table
+    st.markdown("### Agency × Country Distribution (Filterable)")
     
     if {"Department/Ind.Agency","PopCountry"}.issubset(df_page.columns):
-        cnt = (df_page.assign(count=1)
+        col1, col2 = st.columns(2)
+        
+        # Get unique values for filters
+        unique_countries = sorted([c for c in df_page["PopCountry"].unique() if c])
+        unique_agencies = sorted([a for a in df_page["Department/Ind.Agency"].unique() if a])
+        
+        with col1:
+            selected_country = st.selectbox(
+                "Select Country",
+                ["All Countries"] + unique_countries,
+                key=f"country_filter_{tab_key}"
+            )
+        
+        with col2:
+            selected_agency = st.selectbox(
+                "Select Agency",
+                ["All Agencies"] + unique_agencies,
+                key=f"agency_filter_{tab_key}"
+            )
+        
+        # Apply filters
+        filtered_df = df_page.copy()
+        if selected_country != "All Countries":
+            filtered_df = filtered_df[filtered_df["PopCountry"] == selected_country]
+        if selected_agency != "All Agencies":
+            filtered_df = filtered_df[filtered_df["Department/Ind.Agency"] == selected_agency]
+        
+        # Show results
+        if not filtered_df.empty:
+            # Create summary statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Contracts", len(filtered_df))
+            with col2:
+                st.metric("Countries", filtered_df["PopCountry"].nunique())
+            with col3:
+                st.metric("Agencies", filtered_df["Department/Ind.Agency"].nunique())
+            
+            # Show detailed breakdown
+            if selected_country == "All Countries" and selected_agency == "All Agencies":
+                # Show pivot table
+                cnt = (filtered_df.assign(count=1)
                       .pivot_table(index="PopCountry", columns="Department/Ind.Agency",
-                                   values="count", aggfunc="sum", fill_value=0))
-        st.dataframe(cnt.sort_index(), use_container_width=True)
+                                 values="count", aggfunc="sum", fill_value=0))
+                st.dataframe(cnt.sort_index(), use_container_width=True, height=400)
+            else:
+                # Show filtered results as a list
+                display_cols = ["PostedDate", "Title", "PopCountry", "Department/Ind.Agency", "Type"]
+                st.dataframe(filtered_df[display_cols].sort_values("PostedDate", ascending=False), 
+                           use_container_width=True, height=400)
+        else:
+            st.info("No contracts match the selected filters.")
     else:
         st.info("Need columns: Department/Ind.Agency and PopCountry.")
 
-# ---------- FIXED Grid with proper selection handling ----------
-COMPACT_COL_ORDER = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Copy SAM Link"]
+# ---------- Grid with proper Link column ----------
+COMPACT_COL_ORDER = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Link"]
 
 def render_grid(df_page: pd.DataFrame, tab_key: str):
     work = df_page.copy()
+    
+    # Ensure all display columns exist
     for c in COMPACT_COL_ORDER:
         if c not in work.columns:
             work[c] = ""
-
+    
+    # Make Link column clickable
+    if "Link" in work.columns:
+        work["Link"] = work["Link"].apply(lambda x: f'<a href="{x}" target="_blank">View on SAM.gov</a>' if x else "")
+    
     display_cols = COMPACT_COL_ORDER[:]
     gb = GridOptionsBuilder.from_dataframe(work[display_cols])
     gb.configure_default_column(filter=True, sortable=True, resizable=True, floatingFilter=True)
     gb.configure_selection(selection_mode="single", use_checkbox=True)
+    
+    # Make Link column render as HTML
+    gb.configure_column("Link", cellRenderer='agGroupCellRenderer', 
+                       wrapText=True, autoHeight=True)
+    
     if "_AwardAmountNumeric" in work.columns:
         gb.configure_column("_AwardAmountNumeric", hide=True)
 
@@ -323,27 +365,26 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
         height=420,
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
-        allow_unsafe_jscode=False,
+        allow_unsafe_jscode=True,  # Needed for HTML links
     )
 
-    # FIXED: Handle different return types from AgGrid
+    # Handle selection
     selected_rows = grid.get("selected_rows", None)
     
-    # Check if we have selected rows and handle appropriately
     has_selection = False
     selected_data = None
     
     if selected_rows is not None:
-        # Check if it's a DataFrame
         if isinstance(selected_rows, pd.DataFrame):
             if not selected_rows.empty:
                 has_selection = True
-                selected_data = selected_rows.iloc[0].to_dict()
-        # Check if it's a list
+                # Get the original row from df_page using index
+                idx = selected_rows.index[0]
+                if idx < len(df_page):
+                    selected_data = df_page.iloc[idx].to_dict()
         elif isinstance(selected_rows, list) and len(selected_rows) > 0:
             has_selection = True
             selected_data = selected_rows[0]
-        # Check if it's a dict
         elif isinstance(selected_rows, dict):
             has_selection = True
             selected_data = selected_rows
@@ -352,30 +393,33 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
         st.divider()
         st.subheader("Contract Details")
 
-        # Get SAM link
-        sam_link = ""
-        for c in ("Link", "SAM Link", "SAM_Link", "URL", "NoticeLink"):
-            if c in selected_data:
-                sam_link = str(selected_data.get(c, "")).strip()
-                if sam_link and sam_link != "nan":
-                    break
+        # Get the actual SAM link from the original data
+        sam_link = str(selected_data.get("Link", "")).strip()
+        if not sam_link or sam_link == "nan":
+            sam_link = ""
+        
+        # Clean HTML tags if present
+        if "<a href=" in sam_link:
+            match = re.search(r'href="([^"]+)"', sam_link)
+            if match:
+                sam_link = match.group(1)
 
         # Action buttons
-        c1, c2, _ = st.columns([1,1,6])
+        c1, c2, _ = st.columns([1.5, 1.5, 5])
         with c1:
             if sam_link:
-                st.link_button(f"Open in SAM.gov", sam_link)
+                st.markdown(f"[🔗 Open in SAM.gov]({sam_link})")
             else:
-                st.button("No SAM Link", disabled=True)
+                st.info("No SAM Link")
         with c2:
-            if st.button(f"Copy Link ({tab_key})"):
+            if st.button(f"📋 Copy Link ({tab_key})"):
                 if sam_link:
                     streamlit_js_eval(jsCode=f"navigator.clipboard.writeText('{sam_link}')")
-                    st.success("✅ Copied to clipboard!")
+                    st.success("✅ Copied!")
                 else:
                     st.warning("No link available")
 
-        # Description in expandable section
+        # Description
         with st.expander("📋 Full Description", expanded=True):
             desc_val = ""
             for cand in ("Description", "FullDescription", "Summary", "DescriptionText"):
@@ -385,19 +429,18 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
                         break
             st.write(desc_val or "(No description available)")
 
-        # All fields in organized layout
+        # All fields
         st.markdown("### 📊 All Contract Information")
         
-        # Organize fields by category
+        # Organize fields
         basic_fields = ["NoticeID", "Title", "PostedDate", "Type", "Department/Ind.Agency", 
                        "Sub-Tier", "Office"]
         location_fields = ["PopCountry", "CountryCode"]
         contact_fields = ["PrimaryContactTitle", "PrimaryContactEmail", "PrimaryContactPhone",
                          "SecondaryContactEmail", "SecondaryContactPhone"]
         award_fields = ["AwardNumber", "AwardDate", "Award$", "Award$+", "Awardee"]
-        other_fields = ["OrganizationType", "Link"]
+        other_fields = ["OrganizationType"]
         
-        # Display categorized information
         col1, col2 = st.columns(2)
         
         with col1:
@@ -435,26 +478,11 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
                 if field in selected_data:
                     val = selected_data[field]
                     if val and str(val) != "nan" and str(val) != "":
-                        # Truncate long URLs for display
-                        if field == "Link" and len(str(val)) > 50:
-                            display_val = str(val)[:50] + "..."
-                        else:
-                            display_val = val
-                        st.write(f"**{field}:** {display_val}")
-            
-            # Any remaining fields not categorized
-            displayed_fields = set(basic_fields + location_fields + contact_fields + 
-                                  award_fields + other_fields)
-            remaining = [k for k in selected_data.keys() if k not in displayed_fields and 
-                       not k.startswith("PostedDate_") and not k.endswith("_iso3") and
-                       k not in ["Copy SAM Link", "_AwardAmountNumeric", "id"]]
-            
-            if remaining:
-                st.markdown("#### Additional Fields")
-                for field in remaining:
-                    val = selected_data[field]
-                    if val and str(val) != "nan" and str(val) != "":
                         st.write(f"**{field}:** {val}")
+            
+            # SAM.gov Link
+            if sam_link:
+                st.markdown(f"**Direct Link:** [Open on SAM.gov]({sam_link})")
 
 # ---------- Main ----------
 def main():
@@ -518,14 +546,18 @@ def main():
     for tab, slug, (start, end) in zip(tabs, tab_slugs, windows):
         with tab:
             if start is None:
+                # Archive tab - show ALL historical data
                 df_page = df[ts.notna() & (ts < end)].copy()
                 if df_page.empty:
-                    earliest = df["PostedDate_parsed"].dropna().min()
                     st.warning(
-                        f"No contracts older than 5 years found. "
-                        f"Earliest contract date: **{earliest}**\n\n"
-                        f"Run `python bootstrap_historical.py` to fetch historical data."
+                        "📚 **No historical contracts found yet.**\n\n"
+                        "To load ALL historical data (back to 2002):\n"
+                        "1. Run: `python bootstrap_historical.py`\n"
+                        "2. This will fetch all available archives\n"
+                        "3. Refresh this dashboard to see the data"
                     )
+                else:
+                    st.info(f"📚 Showing {len(df_page)} historical contracts (5+ years old)")
             else:
                 df_page = df[ts.notna() & (ts >= start) & (ts < end)].copy()
 
@@ -535,7 +567,7 @@ def main():
             
             render_grid(df_page, tab_key=slug)
 
-    st.caption("💡 Tip: Click on any row to see full contract details. Use column filters to search.")
+    st.caption("💡 Tip: Click on any row to see full contract details. Links in the grid are clickable!")
 
 if __name__ == "__main__":
     main()

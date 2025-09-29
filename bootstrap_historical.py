@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-bootstrap_historical.py
-
-FIXED VERSION: Fetches ALL historical years and standardizes country codes
+bootstrap_historical.py - FIXED VERSION
+Fetches ALL historical years, properly deduplicates, and captures all African contracts
 """
 
 import os
@@ -19,126 +18,84 @@ from time import sleep
 import requests
 import pandas as pd
 
-# EXPANDED African countries mapping with all variations
-AFRICA_MAPPINGS = {
-    # Algeria
-    "algeria": "DZA", "dza": "DZA", "algérie": "DZA", "people's democratic republic of algeria": "DZA",
-    # Angola
-    "angola": "AGO", "ago": "AGO", "republic of angola": "AGO",
-    # Benin
-    "benin": "BEN", "ben": "BEN", "bénin": "BEN", "republic of benin": "BEN",
-    # Botswana
-    "botswana": "BWA", "bwa": "BWA", "republic of botswana": "BWA",
-    # Burkina Faso
-    "burkina faso": "BFA", "bfa": "BFA", "burkina": "BFA",
-    # Burundi
-    "burundi": "BDI", "bdi": "BDI", "republic of burundi": "BDI",
-    # Cabo Verde / Cape Verde
-    "cabo verde": "CPV", "cpv": "CPV", "cape verde": "CPV", "republic of cabo verde": "CPV",
-    # Cameroon
-    "cameroon": "CMR", "cmr": "CMR", "cameroun": "CMR", "republic of cameroon": "CMR",
-    # Central African Republic
-    "central african republic": "CAF", "caf": "CAF", "car": "CAF", "centrafrique": "CAF",
-    # Chad
-    "chad": "TCD", "tcd": "TCD", "tchad": "TCD", "republic of chad": "TCD",
-    # Comoros
-    "comoros": "COM", "com": "COM", "comores": "COM", "union of the comoros": "COM",
-    # Congo (Brazzaville)
-    "congo": "COG", "cog": "COG", "congo-brazzaville": "COG", "republic of the congo": "COG", "congo brazzaville": "COG",
-    # Congo (Kinshasa) / DRC
-    "democratic republic of the congo": "COD", "cod": "COD", "drc": "COD", "congo-kinshasa": "COD", 
-    "dr congo": "COD", "congo kinshasa": "COD", "zaire": "COD",
-    # Djibouti
-    "djibouti": "DJI", "dji": "DJI", "republic of djibouti": "DJI",
-    # Egypt
-    "egypt": "EGY", "egy": "EGY", "arab republic of egypt": "EGY", "misr": "EGY",
-    # Equatorial Guinea
-    "equatorial guinea": "GNQ", "gnq": "GNQ", "guinea ecuatorial": "GNQ",
-    # Eritrea
-    "eritrea": "ERI", "eri": "ERI", "state of eritrea": "ERI",
-    # Eswatini / Swaziland
-    "eswatini": "SWZ", "swz": "SWZ", "swaziland": "SWZ", "kingdom of eswatini": "SWZ",
-    # Ethiopia
-    "ethiopia": "ETH", "eth": "ETH", "federal democratic republic of ethiopia": "ETH",
-    # Gabon
-    "gabon": "GAB", "gab": "GAB", "gabonese republic": "GAB",
-    # Gambia
-    "gambia": "GMB", "gmb": "GMB", "the gambia": "GMB", "republic of the gambia": "GMB",
-    # Ghana
-    "ghana": "GHA", "gha": "GHA", "republic of ghana": "GHA",
-    # Guinea
-    "guinea": "GIN", "gin": "GIN", "guinée": "GIN", "republic of guinea": "GIN",
-    # Guinea-Bissau
-    "guinea-bissau": "GNB", "gnb": "GNB", "guinea bissau": "GNB", "guinée-bissau": "GNB",
-    # Ivory Coast / Côte d'Ivoire
-    "ivory coast": "CIV", "civ": "CIV", "côte d'ivoire": "CIV", "cote d'ivoire": "CIV", "cote divoire": "CIV",
-    # Kenya
-    "kenya": "KEN", "ken": "KEN", "republic of kenya": "KEN",
-    # Lesotho
-    "lesotho": "LSO", "lso": "LSO", "kingdom of lesotho": "LSO",
-    # Liberia
-    "liberia": "LBR", "lbr": "LBR", "republic of liberia": "LBR",
-    # Libya
-    "libya": "LBY", "lby": "LBY", "state of libya": "LBY",
-    # Madagascar
-    "madagascar": "MDG", "mdg": "MDG", "republic of madagascar": "MDG",
-    # Malawi
-    "malawi": "MWI", "mwi": "MWI", "republic of malawi": "MWI",
-    # Mali
-    "mali": "MLI", "mli": "MLI", "republic of mali": "MLI",
-    # Mauritania
-    "mauritania": "MRT", "mrt": "MRT", "mauritanie": "MRT", "islamic republic of mauritania": "MRT",
-    # Mauritius
-    "mauritius": "MUS", "mus": "MUS", "republic of mauritius": "MUS",
-    # Morocco
-    "morocco": "MAR", "mar": "MAR", "maroc": "MAR", "kingdom of morocco": "MAR",
-    # Mozambique
-    "mozambique": "MOZ", "moz": "MOZ", "moçambique": "MOZ", "republic of mozambique": "MOZ",
-    # Namibia
-    "namibia": "NAM", "nam": "NAM", "republic of namibia": "NAM",
-    # Niger
-    "niger": "NER", "ner": "NER", "republic of niger": "NER",
-    # Nigeria
-    "nigeria": "NGA", "nga": "NGA", "federal republic of nigeria": "NGA",
-    # Rwanda
-    "rwanda": "RWA", "rwa": "RWA", "republic of rwanda": "RWA",
-    # São Tomé and Príncipe
-    "são tomé and príncipe": "STP", "stp": "STP", "sao tome and principe": "STP", "são tomé": "STP",
-    # Senegal
-    "senegal": "SEN", "sen": "SEN", "sénégal": "SEN", "republic of senegal": "SEN",
-    # Seychelles
-    "seychelles": "SYC", "syc": "SYC", "republic of seychelles": "SYC",
-    # Sierra Leone
-    "sierra leone": "SLE", "sle": "SLE", "republic of sierra leone": "SLE",
-    # Somalia
-    "somalia": "SOM", "som": "SOM", "federal republic of somalia": "SOM",
-    # South Africa
-    "south africa": "ZAF", "zaf": "ZAF", "republic of south africa": "ZAF", "rsa": "ZAF",
-    # South Sudan
-    "south sudan": "SSD", "ssd": "SSD", "republic of south sudan": "SSD",
-    # Sudan
-    "sudan": "SDN", "sdn": "SDN", "republic of the sudan": "SDN",
-    # Tanzania
-    "tanzania": "TZA", "tza": "TZA", "united republic of tanzania": "TZA", "tanganyika": "TZA",
-    # Togo
-    "togo": "TGO", "tgo": "TGO", "togolese republic": "TGO",
-    # Tunisia
-    "tunisia": "TUN", "tun": "TUN", "tunisie": "TUN", "republic of tunisia": "TUN",
-    # Uganda
-    "uganda": "UGA", "uga": "UGA", "republic of uganda": "UGA",
-    # Zambia
-    "zambia": "ZMB", "zmb": "ZMB", "republic of zambia": "ZMB",
-    # Zimbabwe
-    "zimbabwe": "ZWE", "zwe": "ZWE", "republic of zimbabwe": "ZWE"
+# Complete list of 54 African countries with ISO3 codes
+AFRICAN_COUNTRIES = {
+    "ALGERIA": "DZA", "ANGOLA": "AGO", "BENIN": "BEN", "BOTSWANA": "BWA",
+    "BURKINA FASO": "BFA", "BURUNDI": "BDI", "CABO VERDE": "CPV", "CAMEROON": "CMR",
+    "CENTRAL AFRICAN REPUBLIC": "CAF", "CHAD": "TCD", "COMOROS": "COM",
+    "CONGO": "COG", "DEMOCRATIC REPUBLIC OF THE CONGO": "COD", "DJIBOUTI": "DJI",
+    "EGYPT": "EGY", "EQUATORIAL GUINEA": "GNQ", "ERITREA": "ERI", "ESWATINI": "SWZ",
+    "ETHIOPIA": "ETH", "GABON": "GAB", "GAMBIA": "GMB", "GHANA": "GHA",
+    "GUINEA": "GIN", "GUINEA-BISSAU": "GNB", "IVORY COAST": "CIV", "KENYA": "KEN",
+    "LESOTHO": "LSO", "LIBERIA": "LBR", "LIBYA": "LBY", "MADAGASCAR": "MDG",
+    "MALAWI": "MWI", "MALI": "MLI", "MAURITANIA": "MRT", "MAURITIUS": "MUS",
+    "MOROCCO": "MAR", "MOZAMBIQUE": "MOZ", "NAMIBIA": "NAM", "NIGER": "NER",
+    "NIGERIA": "NGA", "RWANDA": "RWA", "SAO TOME AND PRINCIPE": "STP",
+    "SENEGAL": "SEN", "SEYCHELLES": "SYC", "SIERRA LEONE": "SLE", "SOMALIA": "SOM",
+    "SOUTH AFRICA": "ZAF", "SOUTH SUDAN": "SSD", "SUDAN": "SDN", "TANZANIA": "TZA",
+    "TOGO": "TGO", "TUNISIA": "TUN", "UGANDA": "UGA", "ZAMBIA": "ZMB", "ZIMBABWE": "ZWE"
 }
 
-# Set of all valid ISO codes for quick validation
-AFRICA_ISO3 = set(['DZA', 'AGO', 'BEN', 'BWA', 'BFA', 'BDI', 'CPV', 'CMR', 'CAF', 'TCD', 
-                    'COM', 'COG', 'COD', 'DJI', 'EGY', 'GNQ', 'ERI', 'SWZ', 'ETH', 'GAB', 
-                    'GMB', 'GHA', 'GIN', 'GNB', 'CIV', 'KEN', 'LSO', 'LBR', 'LBY', 'MDG', 
-                    'MWI', 'MLI', 'MRT', 'MUS', 'MAR', 'MOZ', 'NAM', 'NER', 'NGA', 'RWA', 
-                    'STP', 'SEN', 'SYC', 'SLE', 'SOM', 'ZAF', 'SSD', 'SDN', 'TZA', 'TGO', 
-                    'TUN', 'UGA', 'ZMB', 'ZWE'])
+# Expanded mappings for all variations
+AFRICA_MAPPINGS = {
+    # Include all variations (lowercase for matching)
+    "algeria": "DZA", "dza": "DZA", "algérie": "DZA",
+    "angola": "AGO", "ago": "AGO",
+    "benin": "BEN", "ben": "BEN", "bénin": "BEN",
+    "botswana": "BWA", "bwa": "BWA",
+    "burkina faso": "BFA", "bfa": "BFA", "burkina": "BFA",
+    "burundi": "BDI", "bdi": "BDI",
+    "cabo verde": "CPV", "cpv": "CPV", "cape verde": "CPV",
+    "cameroon": "CMR", "cmr": "CMR", "cameroun": "CMR",
+    "central african republic": "CAF", "caf": "CAF", "car": "CAF",
+    "chad": "TCD", "tcd": "TCD", "tchad": "TCD",
+    "comoros": "COM", "com": "COM", "comores": "COM",
+    "congo": "COG", "cog": "COG", "congo-brazzaville": "COG", "congo brazzaville": "COG", "republic of congo": "COG",
+    "democratic republic of the congo": "COD", "cod": "COD", "drc": "COD", "dr congo": "COD", "congo-kinshasa": "COD", "zaire": "COD",
+    "djibouti": "DJI", "dji": "DJI",
+    "egypt": "EGY", "egy": "EGY", "misr": "EGY",
+    "equatorial guinea": "GNQ", "gnq": "GNQ",
+    "eritrea": "ERI", "eri": "ERI",
+    "eswatini": "SWZ", "swz": "SWZ", "swaziland": "SWZ",
+    "ethiopia": "ETH", "eth": "ETH",
+    "gabon": "GAB", "gab": "GAB",
+    "gambia": "GMB", "gmb": "GMB", "the gambia": "GMB",
+    "ghana": "GHA", "gha": "GHA",
+    "guinea": "GIN", "gin": "GIN", "guinée": "GIN",
+    "guinea-bissau": "GNB", "gnb": "GNB", "guinea bissau": "GNB",
+    "ivory coast": "CIV", "civ": "CIV", "côte d'ivoire": "CIV", "cote d'ivoire": "CIV", "cote divoire": "CIV",
+    "kenya": "KEN", "ken": "KEN",
+    "lesotho": "LSO", "lso": "LSO",
+    "liberia": "LBR", "lbr": "LBR",
+    "libya": "LBY", "lby": "LBY",
+    "madagascar": "MDG", "mdg": "MDG",
+    "malawi": "MWI", "mwi": "MWI",
+    "mali": "MLI", "mli": "MLI",
+    "mauritania": "MRT", "mrt": "MRT", "mauritanie": "MRT",
+    "mauritius": "MUS", "mus": "MUS", "maurice": "MUS",
+    "morocco": "MAR", "mar": "MAR", "maroc": "MAR",
+    "mozambique": "MOZ", "moz": "MOZ", "moçambique": "MOZ",
+    "namibia": "NAM", "nam": "NAM",
+    "niger": "NER", "ner": "NER",
+    "nigeria": "NGA", "nga": "NGA",
+    "rwanda": "RWA", "rwa": "RWA",
+    "são tomé and príncipe": "STP", "stp": "STP", "sao tome and principe": "STP", "são tomé": "STP",
+    "senegal": "SEN", "sen": "SEN", "sénégal": "SEN",
+    "seychelles": "SYC", "syc": "SYC",
+    "sierra leone": "SLE", "sle": "SLE",
+    "somalia": "SOM", "som": "SOM",
+    "south africa": "ZAF", "zaf": "ZAF", "rsa": "ZAF",
+    "south sudan": "SSD", "ssd": "SSD",
+    "sudan": "SDN", "sdn": "SDN",
+    "tanzania": "TZA", "tza": "TZA", "tanganyika": "TZA",
+    "togo": "TGO", "tgo": "TGO",
+    "tunisia": "TUN", "tun": "TUN", "tunisie": "TUN",
+    "uganda": "UGA", "uga": "UGA",
+    "zambia": "ZMB", "zmb": "ZMB",
+    "zimbabwe": "ZWE", "zwe": "ZWE"
+}
+
+AFRICA_ISO3 = set(AFRICAN_COUNTRIES.values())
 
 PRIMARY_CSV_URL = (
     "https://sam.gov/api/prod/fileextractservices/v1/api/download/"
@@ -154,7 +111,6 @@ ARCHIVE_BASES = [
 ]
 ARCHIVE_FILENAME_TEMPLATE = "FY{YEAR}_archived_opportunities.csv"
 
-CSV_FILENAME_BASE = "ContractOpportunitiesFullCSV.csv"
 SAM_DATA_DIR = os.environ.get("SAM_DATA_DIR")
 LOCAL_DATA_DIR = Path(SAM_DATA_DIR).expanduser().resolve() if SAM_DATA_DIR else (Path.home() / "sam_africa_data")
 DB_PATH = LOCAL_DATA_DIR / "opportunities.db"
@@ -168,12 +124,6 @@ KEEP_COLUMNS = [
 CHUNK_SIZE = 50_000
 LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-HEAD_TIMEOUT = 10
-GET_TIMEOUT = 120
-MAX_RETRIES = 2
-BACKOFF_SECS = 3
-PROGRESS_CHUNK = 5 * 1024 * 1024  # 5 MB
-
 def norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
@@ -182,34 +132,44 @@ ID_CANDIDATES_NORM = {
     "solicitationid","opportunityid","referencenumber","referenceid","refid","solnumber",
 }
 
+def format_country_display(iso_code: str) -> str:
+    """Convert ISO3 to 'COUNTRY NAME (ISO3)' format"""
+    for country, code in AFRICAN_COUNTRIES.items():
+        if code == iso_code:
+            return f"{country} ({code})"
+    return iso_code
+
 def standardize_country_code(value: str) -> str:
-    """Convert any country name or code to standard ISO 3-letter code."""
+    """Convert any country name or code to 'COUNTRY NAME (ISO3)' format"""
     if not value:
         return value
     
-    # Clean the input
     cleaned = str(value).strip().lower()
     
-    # Check if it's already a valid ISO code
+    # Check if already ISO code
     if cleaned.upper() in AFRICA_ISO3:
-        return cleaned.upper()
+        return format_country_display(cleaned.upper())
     
-    # Try to match against our mappings
+    # Try to match against mappings
     if cleaned in AFRICA_MAPPINGS:
-        return AFRICA_MAPPINGS[cleaned]
+        iso_code = AFRICA_MAPPINGS[cleaned]
+        return format_country_display(iso_code)
     
-    # Return original if no match (will be filtered out later)
+    # Check partial matches
+    for mapping_key, iso_code in AFRICA_MAPPINGS.items():
+        if mapping_key in cleaned:
+            return format_country_display(iso_code)
+    
     return value
 
 def exists_fast(url: str) -> bool:
-    """Quick HEAD probe: skip years instantly if not present."""
     try:
-        r = requests.head(url, timeout=HEAD_TIMEOUT)
+        r = requests.head(url, timeout=10)
         return r.status_code in (200, 206, 302, 403)
     except Exception:
         return False
 
-def robust_get(url, *, stream=False, timeout=GET_TIMEOUT, max_retries=MAX_RETRIES, backoff=BACKOFF_SECS):
+def robust_get(url, *, stream=False, timeout=120, max_retries=2, backoff=3):
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -226,7 +186,7 @@ def robust_get(url, *, stream=False, timeout=GET_TIMEOUT, max_retries=MAX_RETRIE
     raise last_err
 
 def download_to(path: Path, url: str):
-    r = robust_get(url, stream=True, timeout=GET_TIMEOUT, max_retries=MAX_RETRIES)
+    r = robust_get(url, stream=True, timeout=120, max_retries=2)
     with open(path, "wb") as f:
         downloaded = 0
         for chunk in r.iter_content(chunk_size=1024 * 1024):
@@ -234,7 +194,7 @@ def download_to(path: Path, url: str):
                 continue
             f.write(chunk)
             downloaded += len(chunk)
-            if downloaded % PROGRESS_CHUNK < 1024 * 1024:
+            if downloaded % (5 * 1024 * 1024) < 1024 * 1024:
                 print(f"      downloaded ~{downloaded // (1024*1024)} MB …", flush=True)
 
 def ensure_db():
@@ -244,7 +204,7 @@ def ensure_db():
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=OFF;")
         cur.execute("PRAGMA temp_store=MEMORY;")
-        keep_defs = ",\n        ".join([f"\"{c}\" TEXT" for c in KEEP_COLUMNS])
+        keep_defs = ",\n        ".join([f'"{c}" TEXT' for c in KEEP_COLUMNS])
         cur.execute(f"""
         CREATE TABLE IF NOT EXISTS opportunities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -279,40 +239,83 @@ def ensure_notice_id_column(df):
     df["NoticeID"] = df.apply(make_hash, axis=1)
     return df
 
-def fix_sam_gov_links(df):
-    """Fix SAM.gov links to ensure they're properly formatted."""
-    if "Link" in df.columns:
-        def fix_link(link):
-            if pd.isna(link) or not link:
-                return ""
-            link = str(link).strip()
-            if link.startswith("http"):
-                return link
-            elif link.startswith("/opp/"):
-                return f"https://sam.gov{link}"
-            elif link.startswith("opp/"):
-                return f"https://sam.gov/{link}"
-            else:
-                # Try to extract notice ID and construct URL
-                parts = link.split("/")
-                for part in parts:
-                    if part and len(part) > 10:  # Likely a notice ID
-                        return f"https://sam.gov/opp/{part}/view"
-                return link
-        df["Link"] = df["Link"].apply(fix_link)
-    return df
+def filter_african_rows(df):
+    for c in ("PopCountry", "CountryCode"):
+        if c not in df.columns:
+            df[c] = ""
+    
+    def row_matches(row):
+        pop = str(row.get("PopCountry", "") or "").strip()
+        cc = str(row.get("CountryCode", "") or "").strip()
+        
+        # More comprehensive matching
+        pop_lower = pop.lower()
+        cc_lower = cc.lower()
+        
+        # Check ISO codes
+        if cc.upper() in AFRICA_ISO3 or pop.upper() in AFRICA_ISO3:
+            return True
+        
+        # Check against all mappings
+        if pop_lower in AFRICA_MAPPINGS or cc_lower in AFRICA_MAPPINGS:
+            return True
+        
+        # Check partial matches for any African country
+        for country_variant in AFRICA_MAPPINGS.keys():
+            if country_variant in pop_lower or country_variant in cc_lower:
+                return True
+        
+        # Check if any ISO3 code appears in the text
+        for iso in AFRICA_ISO3:
+            if iso in pop.upper() or iso in cc.upper():
+                return True
+        
+        return False
+    
+    return df[df.apply(row_matches, axis=1)].copy()
+
+def deduplicate_by_notice_id(conn):
+    """Remove duplicates keeping the most recent based on PostedDate"""
+    cur = conn.cursor()
+    
+    # Find duplicates and keep newest
+    cur.execute("""
+        DELETE FROM opportunities 
+        WHERE id NOT IN (
+            SELECT MIN(id) 
+            FROM opportunities 
+            GROUP BY "NoticeID"
+            HAVING COUNT(*) = 1
+            
+            UNION
+            
+            SELECT id FROM (
+                SELECT id, "NoticeID", "PostedDate",
+                       ROW_NUMBER() OVER (PARTITION BY "NoticeID" ORDER BY "PostedDate" DESC, id DESC) as rn
+                FROM opportunities
+                WHERE "NoticeID" IN (
+                    SELECT "NoticeID" 
+                    FROM opportunities 
+                    GROUP BY "NoticeID" 
+                    HAVING COUNT(*) > 1
+                )
+            ) WHERE rn = 1
+        )
+    """)
+    
+    deleted = cur.rowcount
+    conn.commit()
+    print(f"Removed {deleted} duplicate entries", flush=True)
+    return deleted
 
 def insert_new_rows_chunk(cur, df_chunk) -> tuple[int, int]:
-    """Insert a chunk row-by-row into 'opportunities'. Returns: (inserted_count, duplicate_skipped_count)"""
-    # Standardize country codes before insertion
+    # Standardize country codes to display format
     if "PopCountry" in df_chunk.columns:
         df_chunk["PopCountry"] = df_chunk["PopCountry"].apply(standardize_country_code)
     if "CountryCode" in df_chunk.columns:
         df_chunk["CountryCode"] = df_chunk["CountryCode"].apply(standardize_country_code)
     
-    # Fix SAM.gov links
-    df_chunk = fix_sam_gov_links(df_chunk)
-    
+    # Preserve original Link column as-is
     for c in KEEP_COLUMNS:
         if c not in df_chunk.columns:
             df_chunk[c] = None
@@ -340,45 +343,13 @@ def insert_new_rows_chunk(cur, df_chunk) -> tuple[int, int]:
             continue
     return inserted, dupes
 
-def filter_african_rows(df):
-    for c in ("PopCountry", "CountryCode"):
-        if c not in df.columns:
-            df[c] = ""
-    
-    def row_matches(row):
-        pop = str(row.get("PopCountry", "") or "").strip()
-        cc = str(row.get("CountryCode", "") or "").strip()
-        
-        # Check if already ISO code
-        if cc.upper() in AFRICA_ISO3:
-            return True
-        if pop.upper() in AFRICA_ISO3:
-            return True
-            
-        # Check if it's a country name that maps to Africa
-        pop_lower = pop.lower()
-        cc_lower = cc.lower()
-        
-        if pop_lower in AFRICA_MAPPINGS:
-            return True
-        if cc_lower in AFRICA_MAPPINGS:
-            return True
-            
-        # Check for partial matches
-        for country_name in AFRICA_MAPPINGS.keys():
-            if country_name in pop_lower or country_name in cc_lower:
-                return True
-                
-        return False
-    
-    return df[df.apply(row_matches, axis=1)].copy()
-
 def iter_csv_chunks(path: Path):
     enc_trials = [
         ("utf-8", "replace"),
         ("utf-8-sig", "strict"),
         ("cp1252", "replace"),
         ("latin-1", "replace"),
+        ("iso-8859-1", "replace"),
     ]
     last_err = None
     for enc, enc_err in enc_trials:
@@ -421,16 +392,14 @@ def ingest_file_into_db(path: Path, label: str):
             total_dupes += dupes
             if i % 2 == 0:
                 conn.commit()
-            print(f"      chunk {i}: matched={len(matched)} inserted={inserted} dupes={dupes}", flush=True)
-        conn.commit()
-        cur.execute('PRAGMA optimize;')
-        cur.execute('VACUUM;')
+            if i % 10 == 0:
+                print(f"      chunk {i}: matched={len(matched)} inserted={inserted} dupes={dupes}", flush=True)
         conn.commit()
     finally:
         conn.close()
     print(f"[{label}] matched={total_matched}, inserted={total_inserted}, duplicate_skipped={total_dupes}", flush=True)
 
-def backfill_archives(start_year=1970, end_year=None):
+def backfill_archives(start_year=1998, end_year=None):
     if end_year is None:
         today = datetime.date.today()
         fy = today.year if today.month < 10 else today.year + 1
@@ -438,15 +407,12 @@ def backfill_archives(start_year=1970, end_year=None):
 
     print(f"Backfilling archives from FY{start_year} to FY{end_year} …", flush=True)
     
-    # ALL available years according to SAM.gov
-    available_years = [1970, 1980] + list(range(1998, 2026)) + [2030]
+    # Check ALL years from 1998 to current (SAM.gov has data from ~2002)
+    available_years = list(range(1998, end_year + 1))
 
     with tempfile.TemporaryDirectory() as td:
         tmpdir = Path(td)
         for year in available_years:
-            if year < start_year or year > end_year:
-                continue
-                
             filename = ARCHIVE_FILENAME_TEMPLATE.format(YEAR=year)
             print(f"\nChecking FY{year} …", flush=True)
             found = False
@@ -467,36 +433,32 @@ def backfill_archives(start_year=1970, end_year=None):
                 except Exception as e:
                     print(f"    download/ingest failed: {e}", flush=True)
             if not found:
-                print(f"FY{year} archive not found at known locations; skipping.", flush=True)
+                print(f"FY{year} archive not found; skipping.", flush=True)
 
+    # After all ingestion, deduplicate
+    print("\nPerforming global deduplication…", flush=True)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        deduplicate_by_notice_id(conn)
+        cur = conn.cursor()
+        cur.execute('PRAGMA optimize;')
+        cur.execute('VACUUM;')
+        conn.commit()
+    finally:
+        conn.close()
+    
     print("Archive backfill complete.", flush=True)
-
-def robust_get_csv(url, *, timeout=300):
-    last_err = None
-    for attempt in range(1, 3):
-        try:
-            r = requests.get(url, stream=True, timeout=timeout)
-            if r.status_code >= 500:
-                raise requests.HTTPError(f"{r.status_code} server error")
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            last_err = e
-            print(f"  (current) attempt {attempt}/2 failed: {e}", flush=True)
-            if attempt < 2:
-                sleep(2 * attempt)
-    raise last_err
 
 def ingest_current_full():
     with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td) / CSV_FILENAME_BASE
+        tmp = Path(td) / "ContractOpportunitiesFullCSV.csv"
         url = os.environ.get("SAM_CSV_URL") or PRIMARY_CSV_URL
         try:
             print(f"Downloading current full CSV from: {url}", flush=True)
-            r = robust_get_csv(url, timeout=300)
+            r = robust_get(url, stream=True, timeout=300, max_retries=3)
         except Exception as e:
             print(f"Primary failed ({e}); trying fallback…", flush=True)
-            r = robust_get_csv(FALLBACK_CSV_URL, timeout=300)
+            r = robust_get(FALLBACK_CSV_URL, stream=True, timeout=300, max_retries=3)
         with open(tmp, "wb") as f:
             shutil.copyfileobj(r.raw, f)
         ingest_file_into_db(tmp, "CURRENT")
@@ -505,19 +467,20 @@ def main():
     LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
     ensure_db()
 
-    start_env = os.environ.get("START_YEAR")
-    end_env = os.environ.get("END_YEAR")
-    if start_env and end_env:
-        try:
-            s = int(start_env); e = int(end_env)
-            backfill_archives(start_year=s, end_year=e)
-        except Exception:
-            print(f"Ignoring invalid START/END envs: {start_env}..{end_env}", flush=True)
-            backfill_archives(start_year=1970, end_year=None)
-    else:
-        backfill_archives(start_year=1970, end_year=None)
-
+    # Backfill ALL historical years starting from 1998
+    backfill_archives(start_year=1998, end_year=None)
+    
+    # Ingest current
     ingest_current_full()
+    
+    # Final deduplication
+    print("\nFinal deduplication pass…", flush=True)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        deduplicate_by_notice_id(conn)
+    finally:
+        conn.close()
+    
     print("Historical backfill done.", flush=True)
 
 if __name__ == "__main__":
