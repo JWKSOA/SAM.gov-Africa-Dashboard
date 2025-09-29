@@ -341,18 +341,18 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
         if c not in work.columns:
             work[c] = ""
     
-    # Make Link column clickable
+    # Simplify Link column for display
     if "Link" in work.columns:
-        work["Link"] = work["Link"].apply(lambda x: f'<a href="{x}" target="_blank">View on SAM.gov</a>' if x else "")
+        work["Link_Display"] = work["Link"].apply(lambda x: "🔗 View" if x else "")
+    else:
+        work["Link_Display"] = ""
     
-    display_cols = COMPACT_COL_ORDER[:]
+    # Update display columns to use Link_Display instead of Link
+    display_cols = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Link_Display"]
+    
     gb = GridOptionsBuilder.from_dataframe(work[display_cols])
     gb.configure_default_column(filter=True, sortable=True, resizable=True, floatingFilter=True)
     gb.configure_selection(selection_mode="single", use_checkbox=True)
-    
-    # Make Link column render as HTML
-    gb.configure_column("Link", cellRenderer='agGroupCellRenderer', 
-                       wrapText=True, autoHeight=True)
     
     if "_AwardAmountNumeric" in work.columns:
         gb.configure_column("_AwardAmountNumeric", hide=True)
@@ -365,7 +365,7 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
         height=420,
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
-        allow_unsafe_jscode=True,  # Needed for HTML links
+        allow_unsafe_jscode=False,
     )
 
     # Handle selection
