@@ -61,11 +61,6 @@ jobs:
         run: |
           python download_and_update.py
 
-      # Optimize database size
-      - name: Optimize DB size
-        run: |
-          python optimize_database.py
-
       # DB maintenance: add helpful indexes + PRAGMA optimize + VACUUM
       - name: Additional SQLite optimization
         run: |
