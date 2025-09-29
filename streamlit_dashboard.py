@@ -224,6 +224,26 @@ def load_data() -> pd.DataFrame:
     # Extract ISO3 codes for mapping
     df["PopCountry_iso3"] = df.get("PopCountry", pd.Series([""]*len(df))).apply(extract_iso3_from_display)
     df["CountryCode_iso3"] = df.get("CountryCode", pd.Series([""]*len(df))).apply(extract_iso3_from_display)
+    
+    # Ensure country columns are in proper display format
+    # If they're not already in "COUNTRY (CODE)" format, convert them
+    def ensure_display_format(val):
+        if not val or str(val) == "nan":
+            return ""
+        val_str = str(val).strip()
+        # Check if already in correct format
+        if "(" in val_str and ")" in val_str:
+            return val_str
+        # Try to convert ISO3 to display format
+        for country, code in AFRICAN_COUNTRIES.items():
+            if val_str.upper() == code or val_str.lower() == country.lower():
+                return f"{country} ({code})"
+        return val_str
+    
+    if "PopCountry" in df.columns:
+        df["PopCountry"] = df["PopCountry"].apply(ensure_display_format)
+    if "CountryCode" in df.columns:
+        df["CountryCode"] = df["CountryCode"].apply(ensure_display_format)
 
     return df
 
@@ -277,7 +297,7 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
     if {"Department/Ind.Agency","PopCountry"}.issubset(df_page.columns):
         col1, col2 = st.columns(2)
         
-        # Get unique values for filters
+        # Get unique values for filters - already in "COUNTRY (CODE)" format
         unique_countries = sorted([c for c in df_page["PopCountry"].unique() if c])
         unique_agencies = sorted([a for a in df_page["Department/Ind.Agency"].unique() if a])
         
@@ -285,7 +305,8 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
             selected_country = st.selectbox(
                 "Select Country",
                 ["All Countries"] + unique_countries,
-                key=f"country_filter_{tab_key}"
+                key=f"country_filter_{tab_key}",
+                help="Countries shown as: COUNTRY NAME (ISO3 CODE)"
             )
         
         with col2:
@@ -331,7 +352,7 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
         st.info("Need columns: Department/Ind.Agency and PopCountry.")
 
 # ---------- Grid with proper Link column ----------
-COMPACT_COL_ORDER = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Link"]
+COMPACT_COL_ORDER = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Link_Display"]
 
 def render_grid(df_page: pd.DataFrame, tab_key: str):
     work = df_page.copy()
