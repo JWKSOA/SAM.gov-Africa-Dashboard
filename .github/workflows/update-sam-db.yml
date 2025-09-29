@@ -31,6 +31,12 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
+      - name: Setup Git LFS
+        run: |
+          git lfs install
+          git lfs track "*.db"
+          git add .gitattributes || true
+
       - name: Ensure data folder exists
         run: mkdir -p data
 
@@ -55,8 +61,13 @@ jobs:
         run: |
           python download_and_update.py
 
+      # Optimize database size
+      - name: Optimize DB size
+        run: |
+          python optimize_database.py
+
       # DB maintenance: add helpful indexes + PRAGMA optimize + VACUUM
-      - name: Optimize SQLite (indexes + optimize + vacuum)
+      - name: Additional SQLite optimization
         run: |
           python - <<'PY'
           import sqlite3, os
@@ -76,6 +87,13 @@ jobs:
           con.commit()
           con.close()
           print("Indexes created; optimize + VACUUM complete.")
+          
+          # Check final size
+          import os
+          size_mb = os.path.getsize(db) / (1024*1024)
+          print(f"Final DB size: {size_mb:.2f} MB")
+          if size_mb > 50:
+              print("WARNING: Database exceeds 50MB - Git LFS will be used")
           PY
 
       # Defensive cleanup: make sure no raw CSVs remain before committing
@@ -83,6 +101,8 @@ jobs:
         run: |
           rm -f data/ContractOpportunitiesFullCSV_*.csv || true
           rm -f data/*.csv || true
+          rm -f data/*.zip || true
+          rm -f data/*.gz || true
 
       # Commit & push if anything changed (typically the DB)
       - name: Commit & push DB updates
