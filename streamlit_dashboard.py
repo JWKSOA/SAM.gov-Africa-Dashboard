@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Fixed Streamlit dashboard with CountryCode visualizations removed and improved dropdowns
+# Fixed Streamlit dashboard with grid selection error resolved
 
 import os
 import json
@@ -299,7 +299,7 @@ def render_visuals(df_page: pd.DataFrame, tab_key: str):
     else:
         st.info("Need columns: Department/Ind.Agency and PopCountry.")
 
-# ---------- Improved Grid with better dropdown details ----------
+# ---------- FIXED Grid with proper selection handling ----------
 COMPACT_COL_ORDER = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Copy SAM Link"]
 
 def render_grid(df_page: pd.DataFrame, tab_key: str):
@@ -326,123 +326,135 @@ def render_grid(df_page: pd.DataFrame, tab_key: str):
         allow_unsafe_jscode=False,
     )
 
-    # Get selected row from the grid
-    selected_rows = grid.get("selected_rows", pd.DataFrame())
+    # FIXED: Handle different return types from AgGrid
+    selected_rows = grid.get("selected_rows", None)
     
-    if not selected_rows.empty:
-        # Get the first selected row
-        selected_index = selected_rows.index[0] if not selected_rows.empty else None
-        
-        if selected_index is not None and selected_index < len(work):
-            # Get the full row data from the original dataframe
-            row = work.iloc[selected_index].to_dict()
-            
-            st.divider()
-            st.subheader("Contract Details")
+    # Check if we have selected rows and handle appropriately
+    has_selection = False
+    selected_data = None
+    
+    if selected_rows is not None:
+        # Check if it's a DataFrame
+        if isinstance(selected_rows, pd.DataFrame):
+            if not selected_rows.empty:
+                has_selection = True
+                selected_data = selected_rows.iloc[0].to_dict()
+        # Check if it's a list
+        elif isinstance(selected_rows, list) and len(selected_rows) > 0:
+            has_selection = True
+            selected_data = selected_rows[0]
+        # Check if it's a dict
+        elif isinstance(selected_rows, dict):
+            has_selection = True
+            selected_data = selected_rows
+    
+    if has_selection and selected_data:
+        st.divider()
+        st.subheader("Contract Details")
 
-            # Get SAM link
-            sam_link = ""
-            for c in ("Link", "SAM Link", "SAM_Link", "URL", "NoticeLink"):
-                if c in row:
-                    sam_link = str(row.get(c, "")).strip()
-                    if sam_link and sam_link != "nan":
-                        break
+        # Get SAM link
+        sam_link = ""
+        for c in ("Link", "SAM Link", "SAM_Link", "URL", "NoticeLink"):
+            if c in selected_data:
+                sam_link = str(selected_data.get(c, "")).strip()
+                if sam_link and sam_link != "nan":
+                    break
 
-            # Action buttons
-            c1, c2, _ = st.columns([1,1,6])
-            with c1:
+        # Action buttons
+        c1, c2, _ = st.columns([1,1,6])
+        with c1:
+            if sam_link:
+                st.link_button(f"Open in SAM.gov", sam_link)
+            else:
+                st.button("No SAM Link", disabled=True)
+        with c2:
+            if st.button(f"Copy Link ({tab_key})"):
                 if sam_link:
-                    st.link_button(f"Open in SAM.gov", sam_link)
+                    streamlit_js_eval(jsCode=f"navigator.clipboard.writeText('{sam_link}')")
+                    st.success("✅ Copied to clipboard!")
                 else:
-                    st.button("No SAM Link", disabled=True)
-            with c2:
-                if st.button(f"Copy Link ({tab_key})"):
-                    if sam_link:
-                        streamlit_js_eval(jsCode=f"navigator.clipboard.writeText('{sam_link}')")
-                        st.success("✅ Copied to clipboard!")
-                    else:
-                        st.warning("No link available")
+                    st.warning("No link available")
 
-            # Description in expandable section
-            with st.expander("📋 Full Description", expanded=True):
-                desc_val = ""
-                for cand in ("Description", "FullDescription", "Summary", "DescriptionText"):
-                    if cand in row:
-                        desc_val = str(row.get(cand, ""))
-                        if desc_val and desc_val != "nan":
-                            break
-                st.write(desc_val or "(No description available)")
+        # Description in expandable section
+        with st.expander("📋 Full Description", expanded=True):
+            desc_val = ""
+            for cand in ("Description", "FullDescription", "Summary", "DescriptionText"):
+                if cand in selected_data:
+                    desc_val = str(selected_data.get(cand, ""))
+                    if desc_val and desc_val != "nan":
+                        break
+            st.write(desc_val or "(No description available)")
 
-            # All fields in organized layout
-            st.markdown("### 📊 All Contract Information")
+        # All fields in organized layout
+        st.markdown("### 📊 All Contract Information")
+        
+        # Organize fields by category
+        basic_fields = ["NoticeID", "Title", "PostedDate", "Type", "Department/Ind.Agency", 
+                       "Sub-Tier", "Office"]
+        location_fields = ["PopCountry", "CountryCode"]
+        contact_fields = ["PrimaryContactTitle", "PrimaryContactEmail", "PrimaryContactPhone",
+                         "SecondaryContactEmail", "SecondaryContactPhone"]
+        award_fields = ["AwardNumber", "AwardDate", "Award$", "Award$+", "Awardee"]
+        other_fields = ["OrganizationType", "Link"]
+        
+        # Display categorized information
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Basic Information")
+            for field in basic_fields:
+                if field in selected_data:
+                    val = selected_data[field]
+                    if val and str(val) != "nan" and str(val) != "":
+                        st.write(f"**{field}:** {val}")
             
-            # Organize fields by category
-            basic_fields = ["NoticeID", "Title", "PostedDate", "Type", "Department/Ind.Agency", 
-                           "Sub-Tier", "Office"]
-            location_fields = ["PopCountry", "CountryCode"]
-            contact_fields = ["PrimaryContactTitle", "PrimaryContactEmail", "PrimaryContactPhone",
-                             "SecondaryContactEmail", "SecondaryContactPhone"]
-            award_fields = ["AwardNumber", "AwardDate", "Award$", "Award$+", "Awardee"]
-            other_fields = ["OrganizationType", "Link"]
+            st.markdown("#### Location")
+            for field in location_fields:
+                if field in selected_data:
+                    val = selected_data[field]
+                    if val and str(val) != "nan" and str(val) != "":
+                        st.write(f"**{field}:** {val}")
             
-            # Display categorized information
-            col1, col2 = st.columns(2)
+            st.markdown("#### Award Information")
+            for field in award_fields:
+                if field in selected_data:
+                    val = selected_data[field]
+                    if val and str(val) != "nan" and str(val) != "":
+                        st.write(f"**{field}:** {val}")
+        
+        with col2:
+            st.markdown("#### Contact Information")
+            for field in contact_fields:
+                if field in selected_data:
+                    val = selected_data[field]
+                    if val and str(val) != "nan" and str(val) != "":
+                        st.write(f"**{field}:** {val}")
             
-            with col1:
-                st.markdown("#### Basic Information")
-                for field in basic_fields:
-                    if field in row:
-                        val = row[field]
-                        if val and str(val) != "nan" and str(val) != "":
-                            st.write(f"**{field}:** {val}")
-                
-                st.markdown("#### Location")
-                for field in location_fields:
-                    if field in row:
-                        val = row[field]
-                        if val and str(val) != "nan" and str(val) != "":
-                            st.write(f"**{field}:** {val}")
-                
-                st.markdown("#### Award Information")
-                for field in award_fields:
-                    if field in row:
-                        val = row[field]
-                        if val and str(val) != "nan" and str(val) != "":
-                            st.write(f"**{field}:** {val}")
+            st.markdown("#### Other Information")
+            for field in other_fields:
+                if field in selected_data:
+                    val = selected_data[field]
+                    if val and str(val) != "nan" and str(val) != "":
+                        # Truncate long URLs for display
+                        if field == "Link" and len(str(val)) > 50:
+                            display_val = str(val)[:50] + "..."
+                        else:
+                            display_val = val
+                        st.write(f"**{field}:** {display_val}")
             
-            with col2:
-                st.markdown("#### Contact Information")
-                for field in contact_fields:
-                    if field in row:
-                        val = row[field]
-                        if val and str(val) != "nan" and str(val) != "":
-                            st.write(f"**{field}:** {val}")
-                
-                st.markdown("#### Other Information")
-                for field in other_fields:
-                    if field in row:
-                        val = row[field]
-                        if val and str(val) != "nan" and str(val) != "":
-                            # Truncate long URLs for display
-                            if field == "Link" and len(str(val)) > 50:
-                                display_val = str(val)[:50] + "..."
-                            else:
-                                display_val = val
-                            st.write(f"**{field}:** {display_val}")
-                
-                # Any remaining fields not categorized
-                displayed_fields = set(basic_fields + location_fields + contact_fields + 
-                                      award_fields + other_fields)
-                remaining = [k for k in row.keys() if k not in displayed_fields and 
-                           not k.startswith("PostedDate_") and not k.endswith("_iso3") and
-                           k not in ["Copy SAM Link", "_AwardAmountNumeric", "id"]]
-                
-                if remaining:
-                    st.markdown("#### Additional Fields")
-                    for field in remaining:
-                        val = row[field]
-                        if val and str(val) != "nan" and str(val) != "":
-                            st.write(f"**{field}:** {val}")
+            # Any remaining fields not categorized
+            displayed_fields = set(basic_fields + location_fields + contact_fields + 
+                                  award_fields + other_fields)
+            remaining = [k for k in selected_data.keys() if k not in displayed_fields and 
+                       not k.startswith("PostedDate_") and not k.endswith("_iso3") and
+                       k not in ["Copy SAM Link", "_AwardAmountNumeric", "id"]]
+            
+            if remaining:
+                st.markdown("#### Additional Fields")
+                for field in remaining:
+                    val = selected_data[field]
+                    if val and str(val) != "nan" and str(val) != "":
+                        st.write(f"**{field}:** {val}")
 
 # ---------- Main ----------
 def main():
