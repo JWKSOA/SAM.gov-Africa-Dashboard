@@ -30,3 +30,31 @@ Found 195 rows that reference African countries.
 Inserted 1 new rows into DB.
 Deleted old CSV: /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_24_2025.csv
 Done.
+Downloading CSV from: https://sam.gov/api/prod/fileextractservices/v1/api/download/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public
+Saved CSV to temp: /var/folders/g7/rl56lbj978vbkl1z20xw80_c0000gn/T/tmp1zssn0wf/ContractOpportunitiesFullCSV.csv
+Reading CSV in chunks with encoding=utf-8, errors=replace ...
+Found 187 rows that reference African countries.
+Inserted 0 new rows into DB.
+Saved a copy locally at /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_26_2025.csv (NOT committed to git).
+Done.
+Downloading CSV from: https://sam.gov/api/prod/fileextractservices/v1/api/download/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public
+Saved CSV to temp: /var/folders/g7/rl56lbj978vbkl1z20xw80_c0000gn/T/tmpwozn06wv/ContractOpportunitiesFullCSV.csv
+Reading CSV in chunks with encoding=utf-8, errors=replace ...
+Found 187 rows that reference African countries.
+Inserted 3 new rows into DB.
+Saved a copy locally at /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_27_2025.csv (NOT committed to git).
+Done.
+Downloading CSV from: https://sam.gov/api/prod/fileextractservices/v1/api/download/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public
+Saved CSV to temp: /var/folders/g7/rl56lbj978vbkl1z20xw80_c0000gn/T/tmpx73bgiby/ContractOpportunitiesFullCSV.csv
+Reading CSV in chunks with encoding=utf-8, errors=replace ...
+Found 182 rows that reference African countries.
+Inserted 0 new rows into DB.
+Saved a copy locally at /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_28_2025.csv (NOT committed to git).
+Done.
+Downloading CSV from: https://sam.gov/api/prod/fileextractservices/v1/api/download/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public
+Saved CSV to temp: /var/folders/g7/rl56lbj978vbkl1z20xw80_c0000gn/T/tmp56bgbb1s/ContractOpportunitiesFullCSV.csv
+Reading CSV in chunks with encoding=utf-8, errors=replace ...
+Found 180 rows that reference African countries.
+Inserted 0 new rows into DB.
+Saved a copy locally at /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_29_2025.csv (NOT committed to git).
+Done.
