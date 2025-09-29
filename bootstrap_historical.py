@@ -9,6 +9,7 @@ and inserts only NEW rows (robust NoticeID detection / synthesis).
 Enhancements:
 - Fast HEAD probe to skip missing years quickly (no long GET timeouts).
 - Streamed download with progress logs.
+- Multiple filename patterns per year (older archives sometimes vary).
 - Clear ingest logs: matched / inserted / duplicate-skipped per file.
 - Optional bounded backfill via env: START_YEAR / END_YEAR.
 """
@@ -41,7 +42,12 @@ ARCHIVE_BASES = [
     "https://s3.amazonaws.com/falextracts/Contract%20Opportunities/Archived%20Data",
     "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/Archived%20Data",
 ]
-ARCHIVE_FILENAME_TEMPLATE = "FY{YEAR}_archived_opportunities.csv"
+# Try several historical name patterns per FY
+ARCHIVE_NAME_PATTERNS = [
+    "FY{YEAR}_archived_opportunities.csv",
+    "Contract_Opportunities_FY{YEAR}.csv",
+    "FY{YEAR}_opportunities.csv",
+]
 
 CSV_FILENAME_BASE = "ContractOpportunitiesFullCSV.csv"
 SAM_DATA_DIR = os.environ.get("SAM_DATA_DIR")
@@ -76,7 +82,7 @@ def exists_fast(url: str) -> bool:
     """Quick HEAD probe: skip years instantly if not present."""
     try:
         r = requests.head(url, timeout=HEAD_TIMEOUT)
-        # Some S3 setups 403 on HEAD for public files; treat 200/206/302/403 as likely exists
+        # Treat 200/206/302/403 as "likely exists" (S3 sometimes 403 on HEAD)
         return r.status_code in (200, 206, 302, 403)
     except Exception:
         return False
@@ -275,25 +281,28 @@ def backfill_archives(start_year=1970, end_year=None):
     with tempfile.TemporaryDirectory() as td:
         tmpdir = Path(td)
         for year in range(start_year, end_year + 1):
-            filename = ARCHIVE_FILENAME_TEMPLATE.format(YEAR=year)
             print(f"\nChecking FY{year} …", flush=True)
             found = False
             for base in ARCHIVE_BASES:
-                url = f"{base}/{filename}"
-                print(f"  probing {url}", flush=True)
-                if not exists_fast(url):
-                    print("    not present (HEAD)", flush=True)
-                    continue
-                try:
-                    tmp = tmpdir / filename
-                    print("    exists — downloading …", flush=True)
-                    download_to(tmp, url)
-                    print("    downloaded — ingesting …", flush=True)
-                    ingest_file_into_db(tmp, f"FY{year}")
-                    found = True
+                for pat in ARCHIVE_NAME_PATTERNS:
+                    filename = pat.format(YEAR=year)
+                    url = f"{base}/{filename}"
+                    print(f"  probing {url}", flush=True)
+                    if not exists_fast(url):
+                        print("    not present (HEAD)", flush=True)
+                        continue
+                    try:
+                        tmp = tmpdir / filename
+                        print("    exists — downloading …", flush=True)
+                        download_to(tmp, url)
+                        print("    downloaded — ingesting …", flush=True)
+                        ingest_file_into_db(tmp, f"FY{year}")
+                        found = True
+                        break
+                    except Exception as e:
+                        print(f"    download/ingest failed: {e}", flush=True)
+                if found:
                     break
-                except Exception as e:
-                    print(f"    download/ingest failed: {e}", flush=True)
             if not found:
                 print(f"FY{year} archive not found at known locations; skipping.", flush=True)
 
@@ -333,7 +342,6 @@ def main():
     LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
     ensure_db()
 
-    # Optional bounded range via env START_YEAR / END_YEAR
     start_env = os.environ.get("START_YEAR")
     end_env = os.environ.get("END_YEAR")
     if start_env and end_env:
