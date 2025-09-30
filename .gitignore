@@ -84,4 +84,4 @@ data/.last_ids.json
 !data/.gitkeep
 
 # Database files over 50MB should use Git LFS
-# (configured dynamically in GitHub Action)
+# (configured dynamically in GitHub Action)data/opportunities.db

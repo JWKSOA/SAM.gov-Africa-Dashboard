@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 streamlit_dashboard.py - Optimized SAM.gov Africa Dashboard
-High-performance dashboard with caching and efficient queries
-Modified to use tabs for different time periods
+Modified to automatically combine split databases on startup
 """
 
 import os
@@ -21,6 +20,18 @@ import streamlit as st
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# AUTO-COMBINE DATABASES ON STREAMLIT CLOUD
+# This runs before anything else to ensure the full database is available
+if not Path("data/opportunities.db").exists() or Path("data/opportunities.db").stat().st_size < 1000000:
+    try:
+        from combine_databases import combine_databases
+        with st.spinner("🔄 Preparing database (first time setup, this may take a minute)..."):
+            combine_databases()
+        st.success("✅ Database ready!")
+    except Exception as e:
+        st.error(f"Failed to prepare database: {e}")
+        st.info("The dashboard will work with limited functionality")
 
 # Import utilities
 try:
