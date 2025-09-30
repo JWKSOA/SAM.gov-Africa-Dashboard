@@ -197,7 +197,12 @@ def test_github_action():
         return True  # Not critical
     
     try:
-        import yaml
+        try:
+            import yaml
+        except ImportError:
+            print_status("Installing PyYAML for workflow test...", "info")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "pyyaml", "-q"])
+            import yaml
         with open(workflow_path, 'r') as f:
             yaml.safe_load(f)
         print_status("Workflow syntax valid", "success")

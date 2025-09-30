@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 streamlit_dashboard.py - Fixed SAM.gov Africa Dashboard
-All issues resolved: date filtering, statistics, and data loading
+All issues resolved including duplicate column names
 """
 
 import os
@@ -70,32 +70,43 @@ def get_period_counts() -> Dict[str, int]:
         with system.db_manager.get_connection() as conn:
             cur = conn.cursor()
             
-            # Last 7 days
+            # Get today's date for comparison
+            today = datetime.now().date()
+            
+            # Last 7 days - using date arithmetic
+            seven_days_ago = (today - timedelta(days=7)).isoformat()
             cur.execute("""
                 SELECT COUNT(*) FROM opportunities 
-                WHERE datetime(PostedDate) >= datetime('now', '-7 days')
-            """)
+                WHERE date(PostedDate) >= date(?)
+                AND date(PostedDate) <= date('now')
+            """, (seven_days_ago,))
             counts['last_7_days'] = cur.fetchone()[0]
             
             # Last 30 days
+            thirty_days_ago = (today - timedelta(days=30)).isoformat()
             cur.execute("""
                 SELECT COUNT(*) FROM opportunities 
-                WHERE datetime(PostedDate) >= datetime('now', '-30 days')
-            """)
+                WHERE date(PostedDate) >= date(?)
+                AND date(PostedDate) <= date('now')
+            """, (thirty_days_ago,))
             counts['last_30_days'] = cur.fetchone()[0]
             
             # Last year
+            one_year_ago = (today - timedelta(days=365)).isoformat()
             cur.execute("""
                 SELECT COUNT(*) FROM opportunities 
-                WHERE datetime(PostedDate) >= datetime('now', '-365 days')
-            """)
+                WHERE date(PostedDate) >= date(?)
+                AND date(PostedDate) <= date('now')
+            """, (one_year_ago,))
             counts['last_year'] = cur.fetchone()[0]
             
             # Last 5 years
+            five_years_ago = (today - timedelta(days=1825)).isoformat()
             cur.execute("""
                 SELECT COUNT(*) FROM opportunities 
-                WHERE datetime(PostedDate) >= datetime('now', '-1825 days')
-            """)
+                WHERE date(PostedDate) >= date(?)
+                AND date(PostedDate) <= date('now')
+            """, (five_years_ago,))
             counts['last_5_years'] = cur.fetchone()[0]
             
             # All time
@@ -116,14 +127,16 @@ def get_period_counts() -> Dict[str, int]:
 
 @st.cache_data(ttl=300)
 def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.DataFrame:
-    """Load data for specific time period - FIXED VERSION"""
+    """Load data for specific time period - FIXED DATE HANDLING"""
     try:
         system = init_system()
         if not system:
             return pd.DataFrame()
         
         if days is not None:
-            # Use datetime comparison for better accuracy
+            # Calculate the cutoff date
+            cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+            
             query = """
                 SELECT 
                     NoticeID, Title, "Department/Ind.Agency" as Department,
@@ -134,11 +147,12 @@ def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.D
                     PrimaryContactEmail, PrimaryContactPhone,
                     OrganizationType, "Sub-Tier" as SubTier, Office
                 FROM opportunities
-                WHERE datetime(PostedDate) >= datetime('now', ? || ' days')
+                WHERE date(PostedDate) >= date(?)
+                AND date(PostedDate) <= date('now')
                 ORDER BY PostedDate DESC
                 LIMIT ?
             """
-            params = (f"-{days}", limit)
+            params = (cutoff_date, limit)
         else:
             # All data
             query = """
@@ -159,18 +173,32 @@ def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.D
         with system.db_manager.get_connection() as conn:
             df = pd.read_sql_query(query, conn, params=params)
         
-        # Parse dates properly
+        # Parse dates with better error handling
         if not df.empty and 'PostedDate' in df.columns:
-            # Remove timezone info for consistent handling
-            df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
-            # Remove timezone if present
-            if df['PostedDate_parsed'].dt.tz is not None:
-                df['PostedDate_parsed'] = df['PostedDate_parsed'].dt.tz_localize(None)
+            # First, try to parse the dates
+            try:
+                # Remove any timezone info and handle various date formats
+                df['PostedDate_parsed'] = pd.to_datetime(
+                    df['PostedDate'], 
+                    errors='coerce',
+                    format='mixed',  # Handle mixed formats
+                    dayfirst=False
+                )
+                
+                # If PostedDate_parsed has timezone info, remove it
+                if hasattr(df['PostedDate_parsed'], 'dt'):
+                    if hasattr(df['PostedDate_parsed'].dt, 'tz'):
+                        df['PostedDate_parsed'] = df['PostedDate_parsed'].dt.tz_localize(None)
+            except Exception as e:
+                # Fallback: treat PostedDate as string for display
+                st.warning(f"Date parsing warning: {e}")
+                df['PostedDate_parsed'] = pd.NaT
         
         return df
         
     except Exception as e:
-        st.warning(f"Error loading data: {e}")
+        st.error(f"Error loading data: {e}")
+        st.info("This might be a temporary issue. Try refreshing the page.")
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -187,19 +215,23 @@ def check_for_updates() -> Tuple[bool, str]:
             # Get the most recent PostedDate
             cur.execute("""
                 SELECT MAX(PostedDate) FROM opportunities
+                WHERE PostedDate IS NOT NULL
             """)
             
             result = cur.fetchone()
             if result and result[0]:
-                last_date = pd.to_datetime(result[0])
-                today = pd.Timestamp.now().normalize()
-                
-                # Check if we have today's data
-                if last_date.date() >= today.date():
-                    return True, f"Data is current (last update: {last_date.strftime('%Y-%m-%d')})"
-                else:
-                    days_behind = (today - last_date).days
-                    return False, f"Data is {days_behind} days behind (last update: {last_date.strftime('%Y-%m-%d')})"
+                try:
+                    last_date = pd.to_datetime(result[0])
+                    today = pd.Timestamp.now().normalize()
+                    
+                    # Check if we have today's data
+                    if last_date.date() >= today.date():
+                        return True, f"Data is current (last update: {last_date.strftime('%Y-%m-%d')})"
+                    else:
+                        days_behind = (today - last_date).days
+                        return False, f"Data is {days_behind} days behind (last update: {last_date.strftime('%Y-%m-%d')})"
+                except:
+                    return False, "Unable to parse last update date"
             else:
                 return False, "No data in database"
                 
@@ -251,29 +283,48 @@ def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Fig
 
 def create_timeline_chart(df: pd.DataFrame, title: str = "Daily Contract Postings") -> go.Figure:
     """Create timeline chart of opportunities"""
-    if df.empty or 'PostedDate_parsed' not in df.columns:
+    if df.empty:
+        return go.Figure()
+    
+    # Check if PostedDate_parsed exists and has valid data
+    if 'PostedDate_parsed' not in df.columns:
+        # Try to use PostedDate directly
+        if 'PostedDate' in df.columns:
+            try:
+                df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
+            except:
+                return go.Figure()
+    
+    # Filter out invalid dates
+    valid_dates_df = df[df['PostedDate_parsed'].notna()]
+    
+    if valid_dates_df.empty:
         return go.Figure()
     
     # Group by date
-    timeline = df.groupby(df['PostedDate_parsed'].dt.date).size().reset_index()
-    timeline.columns = ['Date', 'Count']
-    
-    fig = px.line(
-        timeline,
-        x='Date',
-        y='Count',
-        title=title,
-        labels={'Count': 'Number of Contracts', 'Date': 'Posted Date'}
-    )
-    
-    fig.update_traces(mode='lines+markers')
-    fig.update_layout(
-        height=300,
-        margin=dict(t=30, b=0, l=0, r=0),
-        showlegend=False
-    )
-    
-    return fig
+    try:
+        timeline = valid_dates_df.groupby(valid_dates_df['PostedDate_parsed'].dt.date).size().reset_index()
+        timeline.columns = ['Date', 'Count']
+        
+        fig = px.line(
+            timeline,
+            x='Date',
+            y='Count',
+            title=title,
+            labels={'Count': 'Number of Contracts', 'Date': 'Posted Date'}
+        )
+        
+        fig.update_traces(mode='lines+markers')
+        fig.update_layout(
+            height=300,
+            margin=dict(t=30, b=0, l=0, r=0),
+            showlegend=False
+        )
+        
+        return fig
+    except Exception as e:
+        st.warning(f"Could not create timeline chart: {e}")
+        return go.Figure()
 
 def create_agency_chart(df: pd.DataFrame) -> go.Figure:
     """Create agency distribution chart"""
@@ -303,31 +354,32 @@ def create_agency_chart(df: pd.DataFrame) -> go.Figure:
 def display_period_content(df: pd.DataFrame, period_name: str, period_description: str):
     """Display content for a specific time period"""
     
+    # Debug info - show what data we have
+    if df.empty:
+        st.warning(f"No data available for {period_description}")
+        return
+    
     # Filter controls in sidebar
     with st.sidebar:
         st.subheader(f"🔍 {period_name} Filters")
         
-        if not df.empty:
-            # Country filter
-            countries = sorted(df['PopCountry'].dropna().unique())
-            selected_country = st.selectbox(
-                f"Country ({period_name})",
-                ["All Countries"] + list(countries),
-                index=0,
-                key=f"country_{period_name}"
-            )
-            
-            # Agency filter
-            agencies = sorted(df['Department'].dropna().unique())
-            selected_agency = st.selectbox(
-                f"Agency ({period_name})",
-                ["All Agencies"] + list(agencies)[:50],
-                index=0,
-                key=f"agency_{period_name}"
-            )
-        else:
-            selected_country = "All Countries"
-            selected_agency = "All Agencies"
+        # Country filter
+        countries = sorted(df['PopCountry'].dropna().unique())
+        selected_country = st.selectbox(
+            f"Country ({period_name})",
+            ["All Countries"] + list(countries),
+            index=0,
+            key=f"country_{period_name}"
+        )
+        
+        # Agency filter
+        agencies = sorted(df['Department'].dropna().unique())
+        selected_agency = st.selectbox(
+            f"Agency ({period_name})",
+            ["All Agencies"] + list(agencies)[:50],
+            index=0,
+            key=f"agency_{period_name}"
+        )
     
     # Apply filters
     filtered_df = df.copy()
@@ -353,11 +405,18 @@ def display_period_content(df: pd.DataFrame, period_name: str, period_descriptio
         st.metric("Agencies", f"{unique_agencies}")
     
     with col4:
-        if not filtered_df.empty and 'PostedDate_parsed' in filtered_df.columns:
-            latest_date = filtered_df['PostedDate_parsed'].max()
-            if pd.notna(latest_date):
-                st.metric("Latest Post", latest_date.strftime("%Y-%m-%d"))
-            else:
+        if not filtered_df.empty:
+            # Try to get latest date
+            try:
+                if 'PostedDate_parsed' in filtered_df.columns and filtered_df['PostedDate_parsed'].notna().any():
+                    latest_date = filtered_df['PostedDate_parsed'].max()
+                    if pd.notna(latest_date):
+                        st.metric("Latest Post", latest_date.strftime("%Y-%m-%d"))
+                    else:
+                        st.metric("Latest Post", filtered_df['PostedDate'].max()[:10] if 'PostedDate' in filtered_df.columns else "N/A")
+                else:
+                    st.metric("Latest Post", filtered_df['PostedDate'].max()[:10] if 'PostedDate' in filtered_df.columns else "N/A")
+            except:
                 st.metric("Latest Post", "N/A")
         else:
             st.metric("Latest Post", "N/A")
@@ -379,10 +438,14 @@ def display_period_content(df: pd.DataFrame, period_name: str, period_descriptio
             col1, col2 = st.columns([2, 3])
             
             with col1:
+                # FIX: Properly create the dataframe from value_counts
+                country_df = pd.DataFrame({
+                    'Country': country_counts.index,
+                    'Opportunities': country_counts.values
+                })
+                
                 st.dataframe(
-                    country_counts.reset_index().rename(
-                        columns={'index': 'Country', 'PopCountry': 'Opportunities'}
-                    ),
+                    country_df,
                     hide_index=True,
                     use_container_width=True
                 )
@@ -403,31 +466,41 @@ def display_period_content(df: pd.DataFrame, period_name: str, period_descriptio
     with tab2:
         st.subheader(f"Temporal Trends - {period_description}")
         
-        if not filtered_df.empty and 'PostedDate_parsed' in filtered_df.columns:
+        if not filtered_df.empty:
             timeline_fig = create_timeline_chart(
                 filtered_df, 
                 f"Daily Contract Postings - {period_description}"
             )
             st.plotly_chart(timeline_fig, use_container_width=True)
             
-            # Monthly summary
+            # Monthly summary - with better date handling
             st.subheader("Monthly Summary")
             
-            monthly = filtered_df.copy()
-            monthly['Month'] = monthly['PostedDate_parsed'].dt.to_period('M')
-            monthly_summary = monthly.groupby('Month').agg({
-                'NoticeID': 'count',
-                'PopCountry': 'nunique',
-                'Department': 'nunique'
-            }).reset_index()
-            monthly_summary.columns = ['Month', 'Opportunities', 'Countries', 'Agencies']
-            monthly_summary['Month'] = monthly_summary['Month'].astype(str)
-            
-            st.dataframe(
-                monthly_summary.sort_values('Month', ascending=False).head(12),
-                hide_index=True,
-                use_container_width=True
-            )
+            try:
+                monthly = filtered_df.copy()
+                if 'PostedDate_parsed' in monthly.columns and monthly['PostedDate_parsed'].notna().any():
+                    valid_dates = monthly[monthly['PostedDate_parsed'].notna()]
+                    if not valid_dates.empty:
+                        valid_dates['Month'] = valid_dates['PostedDate_parsed'].dt.to_period('M')
+                        monthly_summary = valid_dates.groupby('Month').agg({
+                            'NoticeID': 'count',
+                            'PopCountry': 'nunique',
+                            'Department': 'nunique'
+                        }).reset_index()
+                        monthly_summary.columns = ['Month', 'Opportunities', 'Countries', 'Agencies']
+                        monthly_summary['Month'] = monthly_summary['Month'].astype(str)
+                        
+                        st.dataframe(
+                            monthly_summary.sort_values('Month', ascending=False).head(12),
+                            hide_index=True,
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No valid dates for monthly summary")
+                else:
+                    st.info("Date information not available for monthly summary")
+            except Exception as e:
+                st.info(f"Could not create monthly summary")
         else:
             st.info(f"No temporal data available for {period_description}")
     
@@ -674,31 +747,35 @@ def main():
     
     with tab_7days:
         df_7days = load_data_by_period(days=7)
-        if df_7days.empty:
-            st.info("No contracts posted in the last 7 days. Check back tomorrow!")
-        else:
+        st.info(f"Found {len(df_7days)} contracts in the last 7 days")
+        if not df_7days.empty:
             display_period_content(df_7days, "Last 7 Days", "Past Week")
+        else:
+            st.warning("No contracts posted in the last 7 days. This is normal - new contracts are posted periodically.")
     
     with tab_30days:
         df_30days = load_data_by_period(days=30)
-        if df_30days.empty:
-            st.info("No contracts found for the last 30 days.")
-        else:
+        st.info(f"Found {len(df_30days)} contracts in the last 30 days")
+        if not df_30days.empty:
             display_period_content(df_30days, "Last 30 Days", "Past Month")
+        else:
+            st.warning("No contracts found for the last 30 days.")
     
     with tab_1year:
         df_1year = load_data_by_period(days=365)
-        if df_1year.empty:
-            st.info("No contracts found for the last year.")
-        else:
+        st.info(f"Found {len(df_1year)} contracts in the last year")
+        if not df_1year.empty:
             display_period_content(df_1year, "Last Year", "Past Year")
+        else:
+            st.warning("No contracts found for the last year.")
     
     with tab_5years:
         df_5years = load_data_by_period(days=1825)  # 365 * 5
-        if df_5years.empty:
-            st.info("No contracts found for the last 5 years.")
+        st.info(f"Found {len(df_5years)} contracts in the last 5 years")
+        if not df_5years.empty:
+            display_period_content(df_5years, "Last 5 Years", "Past 5 years")
         else:
-            display_period_content(df_5years, "Last 5 Years", "Past 5 Years")
+            st.warning("No contracts found for the last 5 years.")
     
     with tab_archive:
         df_archive = load_data_by_period(days=None)  # All data
@@ -714,7 +791,7 @@ def main():
             
             display_period_content(df_archive, "Archive", "All Time")
         else:
-            st.info("No data available in archive.")
+            st.error("No data available in archive. Please check database connection.")
     
     # Footer
     st.divider()
