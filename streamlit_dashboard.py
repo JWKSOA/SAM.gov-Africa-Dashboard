@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-streamlit_dashboard.py - Optimized SAM.gov Africa Dashboard
-Fixed version with proper page config placement
+streamlit_dashboard.py - Fixed SAM.gov Africa Dashboard
+All issues resolved: date filtering, statistics, and data loading
 """
 
 import os
@@ -31,42 +31,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ============================================================================
-# NOW we can do other Streamlit operations
-# ============================================================================
-
-# AUTO-COMBINE DATABASES ON STREAMLIT CLOUD (if needed)
-# This now happens AFTER set_page_config
-def ensure_database():
-    """Ensure database exists and is properly combined"""
-    db_path = Path("data/opportunities.db")
-    
-    # Check if database exists and is valid (not just a Git LFS pointer)
-    if not db_path.exists() or db_path.stat().st_size < 1000000:
-        try:
-            # Try to import combine_databases
-            from combine_databases import combine_databases
-            with st.spinner("🔄 Preparing database (first time setup, this may take a minute)..."):
-                success = combine_databases()
-                if success:
-                    st.success("✅ Database ready!")
-                    return True
-                else:
-                    st.error("Failed to prepare database")
-                    return False
-        except ImportError:
-            # combine_databases.py might not be available on Streamlit Cloud
-            st.warning("Database preparation module not available")
-            return False
-        except Exception as e:
-            st.error(f"Database preparation failed: {e}")
-            st.info("The dashboard will attempt to work with available data")
-            return False
-    return True
-
-# Ensure database is ready
-ensure_database()
-
 # Import utilities
 try:
     from sam_utils import get_system, CountryManager, logger
@@ -86,69 +50,122 @@ def init_system():
         st.error(f"Failed to initialize system: {e}")
         return None
 
-# Database queries with caching
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def load_summary_stats() -> Dict[str, Any]:
-    """Load summary statistics"""
+# Get contract counts for each period
+@st.cache_data(ttl=300)
+def get_period_counts() -> Dict[str, int]:
+    """Get contract counts for each time period"""
     try:
         system = init_system()
         if not system:
             return {
-                'total_records': 0,
-                'by_country': {},
-                'recent_records': 0,
-                'size_mb': 0,
-                'error': 'System initialization failed'
+                'last_7_days': 0,
+                'last_30_days': 0,
+                'last_year': 0,
+                'last_5_years': 0,
+                'all_time': 0
             }
-        return system.db_manager.get_statistics()
+        
+        counts = {}
+        
+        with system.db_manager.get_connection() as conn:
+            cur = conn.cursor()
+            
+            # Last 7 days
+            cur.execute("""
+                SELECT COUNT(*) FROM opportunities 
+                WHERE datetime(PostedDate) >= datetime('now', '-7 days')
+            """)
+            counts['last_7_days'] = cur.fetchone()[0]
+            
+            # Last 30 days
+            cur.execute("""
+                SELECT COUNT(*) FROM opportunities 
+                WHERE datetime(PostedDate) >= datetime('now', '-30 days')
+            """)
+            counts['last_30_days'] = cur.fetchone()[0]
+            
+            # Last year
+            cur.execute("""
+                SELECT COUNT(*) FROM opportunities 
+                WHERE datetime(PostedDate) >= datetime('now', '-365 days')
+            """)
+            counts['last_year'] = cur.fetchone()[0]
+            
+            # Last 5 years
+            cur.execute("""
+                SELECT COUNT(*) FROM opportunities 
+                WHERE datetime(PostedDate) >= datetime('now', '-1825 days')
+            """)
+            counts['last_5_years'] = cur.fetchone()[0]
+            
+            # All time
+            cur.execute("SELECT COUNT(*) FROM opportunities")
+            counts['all_time'] = cur.fetchone()[0]
+            
+        return counts
+        
     except Exception as e:
+        st.warning(f"Error getting period counts: {e}")
         return {
-            'total_records': 0,
-            'by_country': {},
-            'recent_records': 0,
-            'size_mb': 0,
-            'error': str(e)
+            'last_7_days': 0,
+            'last_30_days': 0,
+            'last_year': 0,
+            'last_5_years': 0,
+            'all_time': 0
         }
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.DataFrame:
-    """Load data for specific time period"""
+    """Load data for specific time period - FIXED VERSION"""
     try:
         system = init_system()
         if not system:
             return pd.DataFrame()
         
-        query = """
-            SELECT 
-                NoticeID, Title, "Department/Ind.Agency" as Department,
-                PopCountry, CountryCode, PostedDate, Type,
-                AwardNumber, AwardDate, "Award$" as AwardAmount,
-                Awardee, Link, Description,
-                PrimaryContactTitle, PrimaryContactFullName,
-                PrimaryContactEmail, PrimaryContactPhone,
-                OrganizationType, "Sub-Tier" as SubTier, Office
-            FROM opportunities
-            {where_clause}
-            ORDER BY PostedDate DESC
-            LIMIT ?
-        """
-        
         if days is not None:
-            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-            where_clause = "WHERE date(PostedDate) >= date(?)"
-            params = (cutoff, limit)
+            # Use datetime comparison for better accuracy
+            query = """
+                SELECT 
+                    NoticeID, Title, "Department/Ind.Agency" as Department,
+                    PopCountry, CountryCode, PostedDate, Type,
+                    AwardNumber, AwardDate, "Award$" as AwardAmount,
+                    Awardee, Link, Description,
+                    PrimaryContactTitle, PrimaryContactFullName,
+                    PrimaryContactEmail, PrimaryContactPhone,
+                    OrganizationType, "Sub-Tier" as SubTier, Office
+                FROM opportunities
+                WHERE datetime(PostedDate) >= datetime('now', ? || ' days')
+                ORDER BY PostedDate DESC
+                LIMIT ?
+            """
+            params = (f"-{days}", limit)
         else:
-            where_clause = ""
+            # All data
+            query = """
+                SELECT 
+                    NoticeID, Title, "Department/Ind.Agency" as Department,
+                    PopCountry, CountryCode, PostedDate, Type,
+                    AwardNumber, AwardDate, "Award$" as AwardAmount,
+                    Awardee, Link, Description,
+                    PrimaryContactTitle, PrimaryContactFullName,
+                    PrimaryContactEmail, PrimaryContactPhone,
+                    OrganizationType, "Sub-Tier" as SubTier, Office
+                FROM opportunities
+                ORDER BY PostedDate DESC
+                LIMIT ?
+            """
             params = (limit,)
-        
-        query = query.format(where_clause=where_clause)
         
         with system.db_manager.get_connection() as conn:
             df = pd.read_sql_query(query, conn, params=params)
         
-        # Parse dates
+        # Parse dates properly
         if not df.empty and 'PostedDate' in df.columns:
-            df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce', utc=True)
+            # Remove timezone info for consistent handling
+            df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
+            # Remove timezone if present
+            if df['PostedDate_parsed'].dt.tz is not None:
+                df['PostedDate_parsed'] = df['PostedDate_parsed'].dt.tz_localize(None)
         
         return df
         
@@ -157,32 +174,37 @@ def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.D
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def load_historical_summary() -> pd.DataFrame:
-    """Load historical summary by month"""
+def check_for_updates() -> Tuple[bool, str]:
+    """Check if database has today's data"""
     try:
         system = init_system()
         if not system:
-            return pd.DataFrame()
-        
-        query = """
-            SELECT 
-                strftime('%Y-%m', PostedDate) as Month,
-                PopCountry,
-                COUNT(*) as Count
-            FROM opportunities
-            WHERE PostedDate IS NOT NULL
-            GROUP BY strftime('%Y-%m', PostedDate), PopCountry
-            ORDER BY Month DESC
-        """
+            return False, "System not initialized"
         
         with system.db_manager.get_connection() as conn:
-            df = pd.read_sql_query(query, conn)
-        
-        return df
-        
+            cur = conn.cursor()
+            
+            # Get the most recent PostedDate
+            cur.execute("""
+                SELECT MAX(PostedDate) FROM opportunities
+            """)
+            
+            result = cur.fetchone()
+            if result and result[0]:
+                last_date = pd.to_datetime(result[0])
+                today = pd.Timestamp.now().normalize()
+                
+                # Check if we have today's data
+                if last_date.date() >= today.date():
+                    return True, f"Data is current (last update: {last_date.strftime('%Y-%m-%d')})"
+                else:
+                    days_behind = (today - last_date).days
+                    return False, f"Data is {days_behind} days behind (last update: {last_date.strftime('%Y-%m-%d')})"
+            else:
+                return False, "No data in database"
+                
     except Exception as e:
-        st.warning(f"Error loading historical data: {e}")
-        return pd.DataFrame()
+        return False, f"Error checking: {e}"
 
 # Visualization functions
 def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Figure:
@@ -528,54 +550,99 @@ def main():
         
         # Data refresh button
         if st.button("🔄 Trigger Data Update", use_container_width=True):
-            # Clear caches
-            st.cache_data.clear()
+            # Check if data is already up to date
+            is_current, message = check_for_updates()
             
-            # Trigger GitHub Action if configured
-            github_token = st.secrets.get("github_token", "")
-            if github_token:
-                import requests
-                owner = st.secrets.get("github_owner", "JWKSOA")
-                repo = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
-                workflow = st.secrets.get("github_workflow", "update-sam-db.yml")
-                
-                url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
-                headers = {
-                    "Authorization": f"Bearer {github_token}",
-                    "Accept": "application/vnd.github+json"
-                }
-                
-                try:
-                    response = requests.post(
-                        url, 
-                        headers=headers, 
-                        json={"ref": "main"}, 
-                        timeout=10
-                    )
-                    if response.status_code in (201, 204):
-                        st.success("✅ Update triggered! Check GitHub Actions.")
-                    else:
-                        st.error(f"❌ Failed: {response.status_code}")
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
+            if is_current:
+                st.info(f"📊 Data is Currently Up-To-Date\n\n{message}")
             else:
-                st.info("ℹ️ Configure github_token in secrets to enable updates")
+                # Clear caches
+                st.cache_data.clear()
+                
+                # Trigger GitHub Action if configured
+                github_token = st.secrets.get("github_token", "")
+                if github_token:
+                    import requests
+                    owner = st.secrets.get("github_owner", "JWKSOA")
+                    repo = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
+                    workflow = st.secrets.get("github_workflow", "update-sam-db.yml")
+                    
+                    url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
+                    headers = {
+                        "Authorization": f"Bearer {github_token}",
+                        "Accept": "application/vnd.github+json"
+                    }
+                    
+                    # Add inputs to ensure only incremental update
+                    payload = {
+                        "ref": "main",
+                        "inputs": {
+                            "run_bootstrap": "false",
+                            "cleanup_old": "false"
+                        }
+                    }
+                    
+                    try:
+                        response = requests.post(
+                            url, 
+                            headers=headers, 
+                            json=payload, 
+                            timeout=10
+                        )
+                        if response.status_code in (201, 204):
+                            st.success(f"✅ Update triggered!\n\n{message}\n\nCheck GitHub Actions for progress.")
+                        else:
+                            st.error(f"❌ Failed: {response.status_code}")
+                    except Exception as e:
+                        st.error(f"❌ Error: {str(e)}")
+                else:
+                    st.info("ℹ️ Configure github_token in secrets to enable updates")
         
         st.divider()
         
-        # Load overall statistics
-        stats = load_summary_stats()
+        # Load period counts
+        period_counts = get_period_counts()
         
-        st.subheader("📊 Overall Statistics")
+        st.subheader("📊 Contract Statistics")
         
-        if 'error' in stats:
-            st.warning(f"Stats unavailable: {stats['error']}")
-        else:
-            st.metric("Total Records", f"{stats['total_records']:,}")
+        # Display statistics for each period
+        st.metric(
+            "Last 7 Days",
+            f"{period_counts['last_7_days']:,} contracts"
+        )
+        
+        st.metric(
+            "Last 30 Days",
+            f"{period_counts['last_30_days']:,} contracts"
+        )
+        
+        st.metric(
+            "Last Year",
+            f"{period_counts['last_year']:,} contracts"
+        )
+        
+        st.metric(
+            "Last 5 Years",
+            f"{period_counts['last_5_years']:,} contracts"
+        )
+        
+        st.metric(
+            "All Time Total",
+            f"{period_counts['all_time']:,} contracts",
+            help="Total contracts for African countries to date"
+        )
+        
+        # Database info
+        st.divider()
+        
+        try:
+            stats = system.db_manager.get_statistics()
             st.metric("Database Size", f"{stats['size_mb']:.1f} MB")
             
             unique_countries = len([c for c in stats['by_country'] if stats['by_country'][c] > 0])
             st.metric("Active Countries", f"{unique_countries}/54")
+        except:
+            pass
         
         # Info section
         st.divider()
@@ -607,32 +674,47 @@ def main():
     
     with tab_7days:
         df_7days = load_data_by_period(days=7)
-        display_period_content(df_7days, "Last 7 Days", "Past Week")
+        if df_7days.empty:
+            st.info("No contracts posted in the last 7 days. Check back tomorrow!")
+        else:
+            display_period_content(df_7days, "Last 7 Days", "Past Week")
     
     with tab_30days:
         df_30days = load_data_by_period(days=30)
-        display_period_content(df_30days, "Last 30 Days", "Past Month")
+        if df_30days.empty:
+            st.info("No contracts found for the last 30 days.")
+        else:
+            display_period_content(df_30days, "Last 30 Days", "Past Month")
     
     with tab_1year:
         df_1year = load_data_by_period(days=365)
-        display_period_content(df_1year, "Last Year", "Past Year")
+        if df_1year.empty:
+            st.info("No contracts found for the last year.")
+        else:
+            display_period_content(df_1year, "Last Year", "Past Year")
     
     with tab_5years:
         df_5years = load_data_by_period(days=1825)  # 365 * 5
-        display_period_content(df_5years, "Last 5 Years", "Past 5 Years")
+        if df_5years.empty:
+            st.info("No contracts found for the last 5 years.")
+        else:
+            display_period_content(df_5years, "Last 5 Years", "Past 5 Years")
     
     with tab_archive:
         df_archive = load_data_by_period(days=None)  # All data
         
         # Display archive summary first
-        st.info(f"""
-        📚 **Archive Contains All Historical Data**
-        - Total Records: {len(df_archive):,}
-        - Date Range: {df_archive['PostedDate'].min() if not df_archive.empty else 'N/A'} to {df_archive['PostedDate'].max() if not df_archive.empty else 'N/A'}
-        - This includes all data from FY1998 to present
-        """)
-        
-        display_period_content(df_archive, "Archive", "All Time")
+        if not df_archive.empty:
+            st.info(f"""
+            📚 **Archive Contains All Historical Data**
+            - Total Records: {len(df_archive):,}
+            - Date Range: {df_archive['PostedDate'].min() if not df_archive.empty else 'N/A'} to {df_archive['PostedDate'].max() if not df_archive.empty else 'N/A'}
+            - This includes all data from FY1998 to present
+            """)
+            
+            display_period_content(df_archive, "Archive", "All Time")
+        else:
+            st.info("No data available in archive.")
     
     # Footer
     st.divider()
@@ -643,17 +725,24 @@ def main():
         with col1:
             st.markdown(f"""
             **Database Location:** `{system.config.db_path}`  
-            **Total Records:** {stats.get('total_records', 0):,}  
-            **Database Size:** {stats.get('size_mb', 0):.1f} MB
+            **Total Records:** {period_counts.get('all_time', 0):,}  
             """)
+            
+            try:
+                stats = system.db_manager.get_statistics()
+                st.markdown(f"**Database Size:** {stats.get('size_mb', 0):.1f} MB")
+            except:
+                pass
         
         with col2:
-            st.markdown("""
-            **Top 5 Countries:**
-            """)
-            if 'by_country' in stats:
-                for country, count in list(stats['by_country'].items())[:5]:
-                    st.markdown(f"- {country}: {count:,}")
+            st.markdown("**Top 5 Countries:**")
+            try:
+                stats = system.db_manager.get_statistics()
+                if 'by_country' in stats:
+                    for country, count in list(stats['by_country'].items())[:5]:
+                        st.markdown(f"- {country}: {count:,}")
+            except:
+                st.markdown("*Unable to load country statistics*")
 
 if __name__ == "__main__":
     main()
