@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 streamlit_dashboard.py - Optimized SAM.gov Africa Dashboard
-Modified to automatically combine split databases on startup
+Fixed version with proper page config placement
 """
 
 import os
@@ -21,26 +21,9 @@ import streamlit as st
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# AUTO-COMBINE DATABASES ON STREAMLIT CLOUD
-# This runs before anything else to ensure the full database is available
-if not Path("data/opportunities.db").exists() or Path("data/opportunities.db").stat().st_size < 1000000:
-    try:
-        from combine_databases import combine_databases
-        with st.spinner("🔄 Preparing database (first time setup, this may take a minute)..."):
-            combine_databases()
-        st.success("✅ Database ready!")
-    except Exception as e:
-        st.error(f"Failed to prepare database: {e}")
-        st.info("The dashboard will work with limited functionality")
-
-# Import utilities
-try:
-    from sam_utils import get_system, CountryManager, logger
-except ImportError:
-    st.error("Please ensure sam_utils.py is in the same directory")
-    st.stop()
-
-# Page configuration
+# ============================================================================
+# CRITICAL: Page configuration MUST be the first Streamlit command
+# ============================================================================
 st.set_page_config(
     page_title="🌍 SAM.gov Africa Dashboard",
     page_icon="🌍",
@@ -48,79 +31,158 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ============================================================================
+# NOW we can do other Streamlit operations
+# ============================================================================
+
+# AUTO-COMBINE DATABASES ON STREAMLIT CLOUD (if needed)
+# This now happens AFTER set_page_config
+def ensure_database():
+    """Ensure database exists and is properly combined"""
+    db_path = Path("data/opportunities.db")
+    
+    # Check if database exists and is valid (not just a Git LFS pointer)
+    if not db_path.exists() or db_path.stat().st_size < 1000000:
+        try:
+            # Try to import combine_databases
+            from combine_databases import combine_databases
+            with st.spinner("🔄 Preparing database (first time setup, this may take a minute)..."):
+                success = combine_databases()
+                if success:
+                    st.success("✅ Database ready!")
+                    return True
+                else:
+                    st.error("Failed to prepare database")
+                    return False
+        except ImportError:
+            # combine_databases.py might not be available on Streamlit Cloud
+            st.warning("Database preparation module not available")
+            return False
+        except Exception as e:
+            st.error(f"Database preparation failed: {e}")
+            st.info("The dashboard will attempt to work with available data")
+            return False
+    return True
+
+# Ensure database is ready
+ensure_database()
+
+# Import utilities
+try:
+    from sam_utils import get_system, CountryManager, logger
+except ImportError as e:
+    st.error("❌ Critical Error: Cannot import sam_utils module")
+    st.error(f"Error details: {e}")
+    st.info("Please ensure sam_utils.py is in the repository")
+    st.stop()
+
 # Initialize system
 @st.cache_resource
 def init_system():
     """Initialize SAM data system (cached)"""
-    return get_system()
+    try:
+        return get_system()
+    except Exception as e:
+        st.error(f"Failed to initialize system: {e}")
+        return None
 
 # Database queries with caching
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def load_summary_stats() -> Dict[str, Any]:
     """Load summary statistics"""
-    system = init_system()
-    return system.db_manager.get_statistics()
+    try:
+        system = init_system()
+        if not system:
+            return {
+                'total_records': 0,
+                'by_country': {},
+                'recent_records': 0,
+                'size_mb': 0,
+                'error': 'System initialization failed'
+            }
+        return system.db_manager.get_statistics()
+    except Exception as e:
+        return {
+            'total_records': 0,
+            'by_country': {},
+            'recent_records': 0,
+            'size_mb': 0,
+            'error': str(e)
+        }
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.DataFrame:
     """Load data for specific time period"""
-    system = init_system()
-    
-    query = """
-        SELECT 
-            NoticeID, Title, "Department/Ind.Agency" as Department,
-            PopCountry, CountryCode, PostedDate, Type,
-            AwardNumber, AwardDate, "Award$" as AwardAmount,
-            Awardee, Link, Description,
-            PrimaryContactTitle, PrimaryContactFullName,
-            PrimaryContactEmail, PrimaryContactPhone,
-            OrganizationType, "Sub-Tier" as SubTier, Office
-        FROM opportunities
-        {where_clause}
-        ORDER BY PostedDate DESC
-        LIMIT ?
-    """
-    
-    if days is not None:
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-        where_clause = "WHERE date(PostedDate) >= date(?)"
-        params = (cutoff, limit)
-    else:
-        # Archive - all data
-        where_clause = ""
-        params = (limit,)
-    
-    query = query.format(where_clause=where_clause)
-    
-    with system.db_manager.get_connection() as conn:
-        df = pd.read_sql_query(query, conn, params=params)
-    
-    # Parse dates
-    if not df.empty and 'PostedDate' in df.columns:
-        df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
-    
-    return df
+    try:
+        system = init_system()
+        if not system:
+            return pd.DataFrame()
+        
+        query = """
+            SELECT 
+                NoticeID, Title, "Department/Ind.Agency" as Department,
+                PopCountry, CountryCode, PostedDate, Type,
+                AwardNumber, AwardDate, "Award$" as AwardAmount,
+                Awardee, Link, Description,
+                PrimaryContactTitle, PrimaryContactFullName,
+                PrimaryContactEmail, PrimaryContactPhone,
+                OrganizationType, "Sub-Tier" as SubTier, Office
+            FROM opportunities
+            {where_clause}
+            ORDER BY PostedDate DESC
+            LIMIT ?
+        """
+        
+        if days is not None:
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            where_clause = "WHERE date(PostedDate) >= date(?)"
+            params = (cutoff, limit)
+        else:
+            where_clause = ""
+            params = (limit,)
+        
+        query = query.format(where_clause=where_clause)
+        
+        with system.db_manager.get_connection() as conn:
+            df = pd.read_sql_query(query, conn, params=params)
+        
+        # Parse dates
+        if not df.empty and 'PostedDate' in df.columns:
+            df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce', utc=True)
+        
+        return df
+        
+    except Exception as e:
+        st.warning(f"Error loading data: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_historical_summary() -> pd.DataFrame:
     """Load historical summary by month"""
-    system = init_system()
-    
-    query = """
-        SELECT 
-            strftime('%Y-%m', PostedDate) as Month,
-            PopCountry,
-            COUNT(*) as Count
-        FROM opportunities
-        WHERE PostedDate IS NOT NULL
-        GROUP BY strftime('%Y-%m', PostedDate), PopCountry
-        ORDER BY Month DESC
-    """
-    
-    with system.db_manager.get_connection() as conn:
-        df = pd.read_sql_query(query, conn)
-    
-    return df
+    try:
+        system = init_system()
+        if not system:
+            return pd.DataFrame()
+        
+        query = """
+            SELECT 
+                strftime('%Y-%m', PostedDate) as Month,
+                PopCountry,
+                COUNT(*) as Count
+            FROM opportunities
+            WHERE PostedDate IS NOT NULL
+            GROUP BY strftime('%Y-%m', PostedDate), PopCountry
+            ORDER BY Month DESC
+        """
+        
+        with system.db_manager.get_connection() as conn:
+            df = pd.read_sql_query(query, conn)
+        
+        return df
+        
+    except Exception as e:
+        st.warning(f"Error loading historical data: {e}")
+        return pd.DataFrame()
 
 # Visualization functions
 def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Figure:
@@ -451,6 +513,11 @@ def main():
     # Initialize
     system = init_system()
     
+    if not system:
+        st.error("❌ Failed to initialize the system")
+        st.info("Please check that all required files are present in the repository")
+        st.stop()
+    
     # Header
     st.title("🌍 SAM.gov Africa Contract Opportunities Dashboard")
     st.markdown("*Real-time tracking of U.S. government contracting opportunities in African countries*")
@@ -500,11 +567,15 @@ def main():
         stats = load_summary_stats()
         
         st.subheader("📊 Overall Statistics")
-        st.metric("Total Records", f"{stats['total_records']:,}")
-        st.metric("Database Size", f"{stats['size_mb']:.1f} MB")
         
-        unique_countries = len([c for c in stats['by_country'] if stats['by_country'][c] > 0])
-        st.metric("Active Countries", f"{unique_countries}/54")
+        if 'error' in stats:
+            st.warning(f"Stats unavailable: {stats['error']}")
+        else:
+            st.metric("Total Records", f"{stats['total_records']:,}")
+            st.metric("Database Size", f"{stats['size_mb']:.1f} MB")
+            
+            unique_countries = len([c for c in stats['by_country'] if stats['by_country'][c] > 0])
+            st.metric("Active Countries", f"{unique_countries}/54")
         
         # Info section
         st.divider()
@@ -572,16 +643,17 @@ def main():
         with col1:
             st.markdown(f"""
             **Database Location:** `{system.config.db_path}`  
-            **Total Records:** {stats['total_records']:,}  
-            **Database Size:** {stats['size_mb']:.1f} MB
+            **Total Records:** {stats.get('total_records', 0):,}  
+            **Database Size:** {stats.get('size_mb', 0):.1f} MB
             """)
         
         with col2:
             st.markdown("""
             **Top 5 Countries:**
             """)
-            for country, count in list(stats['by_country'].items())[:5]:
-                st.markdown(f"- {country}: {count:,}")
+            if 'by_country' in stats:
+                for country, count in list(stats['by_country'].items())[:5]:
+                    st.markdown(f"- {country}: {count:,}")
 
 if __name__ == "__main__":
     main()
