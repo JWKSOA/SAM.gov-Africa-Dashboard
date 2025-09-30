@@ -1,342 +1,559 @@
 #!/usr/bin/env python3
-# Fixed Streamlit dashboard - simplified with working links
+"""
+streamlit_dashboard.py - Optimized SAM.gov Africa Dashboard
+High-performance dashboard with caching and efficient queries
+"""
 
 import os
+import sys
 import json
-import re
 import sqlite3
 from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import requests
+import plotly.graph_objects as go
 import streamlit as st
 
-# --- ensure libs ---
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import utilities - will be created if not exists
 try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
-except ModuleNotFoundError:
-    import sys, subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit-aggrid>=0.3.5"])
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+    from sam_utils import get_system, CountryManager, logger
+except ImportError:
+    st.error("Please ensure sam_utils.py is in the same directory")
+    st.stop()
 
-try:
-    from streamlit_js_eval import streamlit_js_eval
-except ModuleNotFoundError:
-    import sys, subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit-js-eval>=0.1.7"])
-    from streamlit_js_eval import streamlit_js_eval
+# Page configuration
+st.set_page_config(
+    page_title="🌍 SAM.gov Africa Dashboard",
+    page_icon="🌍",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# ---------- Page setup ----------
-st.set_page_config(page_title="SAM.gov - Africa Opportunities", layout="wide")
+# Initialize system
+@st.cache_resource
+def init_system():
+    """Initialize SAM data system (cached)"""
+    return get_system()
 
-# ---------- DB path ----------
-REPO_DB = Path(__file__).parent / "data" / "opportunities.db"
-HOME_DB = Path.home() / "sam_africa_data" / "opportunities.db"
-DB_PATH = REPO_DB if REPO_DB.exists() else HOME_DB
+# Database queries with caching
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_summary_stats() -> Dict[str, Any]:
+    """Load summary statistics"""
+    system = init_system()
+    return system.db_manager.get_statistics()
 
-STATE_DIR = (REPO_DB.parent if REPO_DB.exists() else HOME_DB.parent)
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-SNAPSHOT_PATH = STATE_DIR / ".last_ids.json"
-
-# ---------- GitHub Action trigger ----------
-GH_OWNER   = st.secrets.get("github_owner", "JWKSOA")
-GH_REPO    = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
-GH_WF_FILE = st.secrets.get("github_workflow_filename", "update-sam-db.yml")
-GH_TOKEN   = st.secrets.get("github_token", "")
-
-# ---------- African Countries Mapping ----------
-AFRICAN_COUNTRIES = {
-    "ALGERIA": "DZA", "ANGOLA": "AGO", "BENIN": "BEN", "BOTSWANA": "BWA",
-    "BURKINA FASO": "BFA", "BURUNDI": "BDI", "CABO VERDE": "CPV", "CAMEROON": "CMR",
-    "CENTRAL AFRICAN REPUBLIC": "CAF", "CHAD": "TCD", "COMOROS": "COM",
-    "CONGO": "COG", "DEMOCRATIC REPUBLIC OF THE CONGO": "COD", "DJIBOUTI": "DJI",
-    "EGYPT": "EGY", "EQUATORIAL GUINEA": "GNQ", "ERITREA": "ERI", "ESWATINI": "SWZ",
-    "ETHIOPIA": "ETH", "GABON": "GAB", "GAMBIA": "GMB", "GHANA": "GHA",
-    "GUINEA": "GIN", "GUINEA-BISSAU": "GNB", "IVORY COAST": "CIV", "KENYA": "KEN",
-    "LESOTHO": "LSO", "LIBERIA": "LBR", "LIBYA": "LBY", "MADAGASCAR": "MDG",
-    "MALAWI": "MWI", "MALI": "MLI", "MAURITANIA": "MRT", "MAURITIUS": "MUS",
-    "MOROCCO": "MAR", "MOZAMBIQUE": "MOZ", "NAMIBIA": "NAM", "NIGER": "NER",
-    "NIGERIA": "NGA", "RWANDA": "RWA", "SAO TOME AND PRINCIPE": "STP",
-    "SENEGAL": "SEN", "SEYCHELLES": "SYC", "SIERRA LEONE": "SLE", "SOMALIA": "SOM",
-    "SOUTH AFRICA": "ZAF", "SOUTH SUDAN": "SSD", "SUDAN": "SDN", "TANZANIA": "TZA",
-    "TOGO": "TGO", "TUNISIA": "TUN", "UGANDA": "UGA", "ZAMBIA": "ZMB", "ZIMBABWE": "ZWE"
-}
-
-# ---------- Helpers ----------
-def extract_iso3_from_display(value: str) -> str | None:
-    """Extract ISO3 code from 'COUNTRY NAME (ISO3)' format"""
-    if not value or not str(value).strip():
-        return None
-    s = str(value).strip()
-    match = re.search(r'\(([A-Z]{3})\)$', s)
-    if match:
-        return match.group(1)
-    if len(s) == 3 and s.isalpha():
-        return s.upper()
-    return None
-
-def trigger_github_workflow(ref: str = "main") -> bool:
-    if not GH_TOKEN:
-        st.error("Missing github_token in Streamlit secrets.")
-        return False
-    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/actions/workflows/{GH_WF_FILE}/dispatches"
-    headers = {
-        "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    payload = {"ref": ref}
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
-        if r.status_code in (201, 204):
-            st.success("Refresh requested. Check GitHub Actions tab.")
-            return True
-        else:
-            st.error(f"GitHub API error {r.status_code}")
-            return False
-    except Exception as e:
-        st.error(f"Failed: {e}")
-        return False
-
-# ---------- Load from SQLite ----------
-@st.cache_data(ttl=60)
-def load_data() -> pd.DataFrame:
-    if not DB_PATH.exists():
-        return pd.DataFrame()
-
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        df = pd.read_sql_query('SELECT * FROM opportunities ORDER BY "PostedDate" DESC', conn)
-    finally:
-        conn.close()
-
-    if "id" in df.columns:
-        df = df.drop(columns=["id"])
-
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_recent_data(days: int = 30, limit: int = 10000) -> pd.DataFrame:
+    """Load recent data with efficient query"""
+    system = init_system()
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    
+    query = """
+        SELECT 
+            NoticeID, Title, "Department/Ind.Agency" as Department,
+            PopCountry, CountryCode, PostedDate, Type,
+            AwardNumber, AwardDate, "Award$" as AwardAmount,
+            Awardee, Link, Description,
+            PrimaryContactEmail, PrimaryContactPhone
+        FROM opportunities
+        WHERE date(PostedDate) >= date(?)
+        ORDER BY PostedDate DESC
+        LIMIT ?
+    """
+    
+    with system.db_manager.get_connection() as conn:
+        df = pd.read_sql_query(query, conn, params=(cutoff, limit))
+    
     # Parse dates
-    if "PostedDate" in df.columns:
-        ts = pd.to_datetime(df["PostedDate"], errors="coerce", utc=True)
-        df["PostedDate_parsed"] = ts
-        df["PostedDate_norm"] = ts.dt.tz_convert(None).dt.normalize()
-    else:
-        df["PostedDate_parsed"] = pd.NaT
-        df["PostedDate_norm"] = pd.NaT
-
-    # Clean NaN values
-    non_time = [c for c in df.columns if not c.startswith("PostedDate_")]
-    df[non_time] = df[non_time].replace({np.nan: ""})
-
-    # Extract ISO3 for mapping
-    df["PopCountry_iso3"] = df.get("PopCountry", pd.Series([""]*len(df))).apply(extract_iso3_from_display)
-
+    if not df.empty and 'PostedDate' in df.columns:
+        df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
+    
     return df
 
-# ---------- Snapshot ----------
-def _load_previous_ids() -> set[str]:
-    try:
-        if SNAPSHOT_PATH.exists():
-            data = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return set(map(str, data))
-    except Exception:
-        pass
-    return set()
-
-def _save_current_ids(ids: set[str]):
-    try:
-        SNAPSHOT_PATH.write_text(json.dumps(sorted(list(ids))), encoding="utf-8")
-    except Exception:
-        pass
-
-def _current_ids(df: pd.DataFrame) -> set[str]:
-    if "NoticeID" in df.columns:
-        return set(df["NoticeID"].astype(str).tolist())
-    return set()
-
-# ---------- Visuals ----------
-def render_visuals(df_page: pd.DataFrame, tab_key: str):
-    if df_page.empty:
-        st.info("No data in this date range.")
-        return
-
-    st.subheader("Contract Distribution by Country")
+@st.cache_data(ttl=3600)
+def load_historical_summary() -> pd.DataFrame:
+    """Load historical summary by month"""
+    system = init_system()
     
-    m = df_page.dropna(subset=["PopCountry_iso3"]).groupby("PopCountry_iso3").size().reset_index(name="opps")
-    if not m.empty:
-        fig = px.choropleth(m, locations="PopCountry_iso3", locationmode="ISO-3",
-                            color="opps", color_continuous_scale="Plasma",
-                            title="African Contract Opportunities")
-        fig.update_geos(scope="africa", showcountries=True)
-        st.plotly_chart(fig, use_container_width=True)
-
-    # Filterable table
-    st.markdown("### Agency × Country Filter")
+    query = """
+        SELECT 
+            strftime('%Y-%m', PostedDate) as Month,
+            PopCountry,
+            COUNT(*) as Count
+        FROM opportunities
+        WHERE PostedDate IS NOT NULL
+        GROUP BY strftime('%Y-%m', PostedDate), PopCountry
+        ORDER BY Month DESC
+    """
     
-    if {"Department/Ind.Agency","PopCountry"}.issubset(df_page.columns):
-        col1, col2 = st.columns(2)
-        
-        unique_countries = sorted([c for c in df_page["PopCountry"].unique() if c])
-        unique_agencies = sorted([a for a in df_page["Department/Ind.Agency"].unique() if a])
-        
-        with col1:
-            selected_country = st.selectbox(
-                "Select Country",
-                ["All Countries"] + unique_countries,
-                key=f"country_{tab_key}"
-            )
-        
-        with col2:
-            selected_agency = st.selectbox(
-                "Select Agency", 
-                ["All Agencies"] + unique_agencies,
-                key=f"agency_{tab_key}"
-            )
-        
-        filtered = df_page.copy()
-        if selected_country != "All Countries":
-            filtered = filtered[filtered["PopCountry"] == selected_country]
-        if selected_agency != "All Agencies":
-            filtered = filtered[filtered["Department/Ind.Agency"] == selected_agency]
-        
-        if not filtered.empty:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Contracts", len(filtered))
-            with col2:
-                st.metric("Countries", filtered["PopCountry"].nunique())
-            with col3:
-                st.metric("Agencies", filtered["Department/Ind.Agency"].nunique())
-
-# ---------- Grid ----------
-def render_grid(df_page: pd.DataFrame, tab_key: str):
-    if df_page.empty:
-        st.info("No data available")
-        return
-        
-    work = df_page.copy()
+    with system.db_manager.get_connection() as conn:
+        df = pd.read_sql_query(query, conn)
     
-    display_cols = ["PostedDate","Title","Department/Ind.Agency","PopCountry","CountryCode","Link"]
-    for c in display_cols:
-        if c not in work.columns:
-            work[c] = ""
+    return df
+
+@st.cache_data(ttl=3600)
+def load_agency_summary() -> pd.DataFrame:
+    """Load agency summary statistics"""
+    system = init_system()
     
-    gb = GridOptionsBuilder.from_dataframe(work[display_cols])
-    gb.configure_default_column(filter=True, sortable=True, resizable=True)
-    gb.configure_selection(selection_mode="single", use_checkbox=True)
+    query = """
+        SELECT 
+            "Department/Ind.Agency" as Agency,
+            COUNT(*) as Total,
+            COUNT(DISTINCT PopCountry) as Countries,
+            MAX(PostedDate) as LastPost
+        FROM opportunities
+        WHERE "Department/Ind.Agency" IS NOT NULL
+        GROUP BY "Department/Ind.Agency"
+        ORDER BY Total DESC
+        LIMIT 20
+    """
     
-    grid = AgGrid(
-        work[display_cols],
-        gridOptions=gb.build(),
-        update_mode=GridUpdateMode.SELECTION_CHANGED,
-        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-        height=420,
-        fit_columns_on_grid_load=True,
-        enable_enterprise_modules=False,
-    )
-
-    # Handle selection
-    selected = grid.get("selected_rows", pd.DataFrame())
+    with system.db_manager.get_connection() as conn:
+        df = pd.read_sql_query(query, conn)
     
-    if isinstance(selected, pd.DataFrame) and not selected.empty:
-        row_data = selected.iloc[0].to_dict()
-    elif isinstance(selected, list) and len(selected) > 0:
-        row_data = selected[0]
-    else:
-        row_data = None
-    
-    if row_data:
-        st.divider()
-        st.subheader("Contract Details")
-        
-        # Direct link
-        link = str(row_data.get("Link", "")).strip()
-        if link and link != "nan":
-            st.markdown(f"🔗 **[Open on SAM.gov]({link})**")
-        
-        # Description
-        with st.expander("Description", expanded=True):
-            desc = str(row_data.get("Description", "")).strip()
-            st.write(desc if desc and desc != "nan" else "(No description)")
-        
-        # Details in columns
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**Basic Info**")
-            for f in ["NoticeID","Title","PostedDate","Type","Department/Ind.Agency"]:
-                if f in row_data:
-                    v = row_data[f]
-                    if v and str(v) != "nan":
-                        st.write(f"**{f}:** {v}")
-        
-        with col2:
-            st.markdown("**Location & Contact**")
-            for f in ["PopCountry","CountryCode","PrimaryContactEmail","PrimaryContactPhone"]:
-                if f in row_data:
-                    v = row_data[f]
-                    if v and str(v) != "nan":
-                        st.write(f"**{f}:** {v}")
+    return df
 
-# ---------- Main ----------
-def main():
-    st.title("🌍 SAM.gov — African Contract Opportunities")
-
-    with st.expander("📊 Data Controls"):
-        if st.button("🔄 Fetch Latest Data"):
-            trigger_github_workflow()
-
-    df = load_data()
-
+# Visualization functions
+def create_map_visualization(df: pd.DataFrame) -> go.Figure:
+    """Create interactive map of opportunities"""
     if df.empty:
-        st.error("No data loaded. Click 'Fetch Latest Data' and wait for GitHub Action.")
-        return
-
-    # Metrics
-    current_ids = _current_ids(df)
-    prev_ids = _load_previous_ids()
-    new_count = len(current_ids - prev_ids) if prev_ids else 0
-    _save_current_ids(current_ids)
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if df["PostedDate_parsed"].notna().any():
-            st.metric("Last Updated", str(df["PostedDate_parsed"].max().date()))
-    with c2:
-        st.metric("New Opportunities", new_count)
-    with c3:
-        st.metric("Total Contracts", len(df))
-
-    st.divider()
-
-    # Tabs
-    today = pd.Timestamp.today().normalize()
-    five_years_ago = today - pd.DateOffset(years=5)
-
-    tabs = st.tabs(["Last 7 Days","Last 30 Days","Last 365 Days","Last 5 Years","Archive (5+ Years)"])
+        return go.Figure()
     
-    windows = [
-        (today - pd.Timedelta(days=7), today + pd.Timedelta(days=1)),
-        (today - pd.Timedelta(days=30), today + pd.Timedelta(days=1)),
-        (today - pd.Timedelta(days=365), today + pd.Timedelta(days=1)),
-        (five_years_ago, today + pd.Timedelta(days=1)),
-        (None, five_years_ago),
-    ]
+    # Extract ISO codes and aggregate
+    country_manager = CountryManager()
+    df['iso3'] = df['PopCountry'].apply(
+        lambda x: x.split('(')[-1].rstrip(')') if '(' in str(x) else None
+    )
+    
+    summary = df.groupby('iso3').size().reset_index(name='Opportunities')
+    summary = summary[summary['iso3'].notna()]
+    
+    # Create choropleth map
+    fig = px.choropleth(
+        summary,
+        locations='iso3',
+        locationmode='ISO-3',
+        color='Opportunities',
+        hover_name='iso3',
+        color_continuous_scale='Viridis',
+        title='Contract Opportunities by Country',
+        labels={'Opportunities': 'Number of Opportunities'}
+    )
+    
+    fig.update_geos(
+        scope='africa',
+        showcoastlines=True,
+        coastlinecolor='RebeccaPurple',
+        showland=True,
+        landcolor='LightGray',
+        showcountries=True,
+        countrycolor='White'
+    )
+    
+    fig.update_layout(
+        height=500,
+        margin=dict(t=30, b=0, l=0, r=0)
+    )
+    
+    return fig
 
-    ts = df["PostedDate_norm"]
-    for tab, (start, end), slug in zip(tabs, windows, ["7d","30d","365d","5y","arch"]):
-        with tab:
-            if start is None:
-                df_page = df[ts.notna() & (ts < end)]
+def create_timeline_chart(df: pd.DataFrame) -> go.Figure:
+    """Create timeline chart of opportunities"""
+    if df.empty or 'PostedDate_parsed' not in df.columns:
+        return go.Figure()
+    
+    # Group by date
+    timeline = df.groupby(df['PostedDate_parsed'].dt.date).size().reset_index()
+    timeline.columns = ['Date', 'Count']
+    
+    fig = px.line(
+        timeline,
+        x='Date',
+        y='Count',
+        title='Daily Contract Postings',
+        labels={'Count': 'Number of Contracts', 'Date': 'Posted Date'}
+    )
+    
+    fig.update_traces(mode='lines+markers')
+    fig.update_layout(
+        height=300,
+        margin=dict(t=30, b=0, l=0, r=0),
+        showlegend=False
+    )
+    
+    return fig
+
+def create_agency_chart(df: pd.DataFrame) -> go.Figure:
+    """Create agency distribution chart"""
+    if df.empty:
+        return go.Figure()
+    
+    top_agencies = df.groupby('Department').size().nlargest(15).reset_index()
+    top_agencies.columns = ['Agency', 'Count']
+    
+    fig = px.bar(
+        top_agencies,
+        x='Count',
+        y='Agency',
+        orientation='h',
+        title='Top 15 Agencies by Opportunity Count',
+        labels={'Count': 'Number of Opportunities', 'Agency': ''}
+    )
+    
+    fig.update_layout(
+        height=400,
+        margin=dict(t=30, b=0, l=0, r=0),
+        yaxis={'categoryorder': 'total ascending'}
+    )
+    
+    return fig
+
+# Main dashboard
+def main():
+    """Main dashboard application"""
+    
+    # Initialize
+    system = init_system()
+    
+    # Header
+    st.title("🌍 SAM.gov Africa Contract Opportunities Dashboard")
+    st.markdown("*Real-time tracking of U.S. government contracting opportunities in African countries*")
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("📊 Dashboard Controls")
+        
+        # Data refresh
+        if st.button("🔄 Trigger Data Update", use_container_width=True):
+            # Clear caches
+            st.cache_data.clear()
+            
+            # Trigger GitHub Action if configured
+            github_token = st.secrets.get("github_token", "")
+            if github_token:
+                import requests
+                owner = st.secrets.get("github_owner", "JWKSOA")
+                repo = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
+                workflow = st.secrets.get("github_workflow", "update-sam-db.yml")
+                
+                url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
+                headers = {
+                    "Authorization": f"Bearer {github_token}",
+                    "Accept": "application/vnd.github+json"
+                }
+                
+                try:
+                    response = requests.post(
+                        url, 
+                        headers=headers, 
+                        json={"ref": "main"}, 
+                        timeout=10
+                    )
+                    if response.status_code in (201, 204):
+                        st.success("✅ Update triggered! Check GitHub Actions.")
+                    else:
+                        st.error(f"❌ Failed: {response.status_code}")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
             else:
-                df_page = df[ts.notna() & (ts >= start) & (ts < end)]
+                st.info("ℹ️ Configure github_token in secrets to enable updates")
+        
+        st.divider()
+        
+        # Filters
+        st.subheader("🔍 Filters")
+        
+        date_range = st.select_slider(
+            "Date Range",
+            options=[7, 30, 90, 180, 365],
+            value=30,
+            format_func=lambda x: f"Last {x} days"
+        )
+        
+        # Load data based on selection
+        df = load_recent_data(days=date_range)
+        
+        if not df.empty:
+            # Country filter
+            countries = sorted(df['PopCountry'].dropna().unique())
+            selected_country = st.selectbox(
+                "Country",
+                ["All Countries"] + list(countries),
+                index=0
+            )
             
-            if not df_page.empty:
-                render_visuals(df_page.copy(), tab_key=slug)
-                st.divider()
+            # Agency filter
+            agencies = sorted(df['Department'].dropna().unique())
+            selected_agency = st.selectbox(
+                "Agency",
+                ["All Agencies"] + list(agencies)[:50],  # Limit to top 50
+                index=0
+            )
+        else:
+            selected_country = "All Countries"
+            selected_agency = "All Agencies"
+        
+        # Info section
+        st.divider()
+        st.subheader("ℹ️ About")
+        st.markdown("""
+        This dashboard tracks U.S. government contract opportunities
+        posted on SAM.gov that involve African countries.
+        
+        **Data Sources:**
+        - Current: SAM.gov daily extract
+        - Historical: FY1998-present archives
+        
+        **Updates:**
+        - Automated daily at 04:30 UTC
+        - Manual refresh available
+        
+        **Coverage:**
+        - All 54 African countries
+        - Federal contracts & grants
+        - Award notifications
+        """)
+    
+    # Main content area
+    
+    # Load statistics
+    stats = load_summary_stats()
+    
+    # Metrics row
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Total Opportunities",
+            f"{stats['total_records']:,}",
+            delta=None
+        )
+    
+    with col2:
+        st.metric(
+            "Recent (30 days)",
+            f"{stats['recent_records']:,}",
+            delta=None
+        )
+    
+    with col3:
+        unique_countries = len([c for c in stats['by_country'] if stats['by_country'][c] > 0])
+        st.metric(
+            "Active Countries",
+            f"{unique_countries}/54",
+            delta=None
+        )
+    
+    with col4:
+        db_size = stats['size_mb']
+        st.metric(
+            "Database Size",
+            f"{db_size:.1f} MB",
+            delta=None
+        )
+    
+    # Apply filters to dataframe
+    filtered_df = df.copy()
+    
+    if selected_country != "All Countries":
+        filtered_df = filtered_df[filtered_df['PopCountry'] == selected_country]
+    
+    if selected_agency != "All Agencies":
+        filtered_df = filtered_df[filtered_df['Department'] == selected_agency]
+    
+    # Visualizations
+    st.divider()
+    
+    # Tabs for different views
+    tab1, tab2, tab3, tab4 = st.tabs(["📍 Map View", "📈 Trends", "🏢 Agencies", "📋 Data Table"])
+    
+    with tab1:
+        st.subheader("Geographic Distribution")
+        
+        if not filtered_df.empty:
+            map_fig = create_map_visualization(filtered_df)
+            st.plotly_chart(map_fig, use_container_width=True)
             
-            render_grid(df_page.copy(), tab_key=slug)
+            # Top countries table
+            st.subheader("Top Countries by Opportunity Count")
+            country_counts = filtered_df['PopCountry'].value_counts().head(10)
+            
+            col1, col2 = st.columns([2, 3])
+            
+            with col1:
+                st.dataframe(
+                    country_counts.reset_index().rename(
+                        columns={'index': 'Country', 'PopCountry': 'Opportunities'}
+                    ),
+                    hide_index=True,
+                    use_container_width=True
+                )
+            
+            with col2:
+                fig = px.pie(
+                    values=country_counts.values,
+                    names=country_counts.index,
+                    title="Distribution by Country"
+                )
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                fig.update_layout(showlegend=False, height=300)
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No data available for selected filters")
+    
+    with tab2:
+        st.subheader("Temporal Trends")
+        
+        if not filtered_df.empty and 'PostedDate_parsed' in filtered_df.columns:
+            # Timeline chart
+            timeline_fig = create_timeline_chart(filtered_df)
+            st.plotly_chart(timeline_fig, use_container_width=True)
+            
+            # Monthly summary
+            st.subheader("Monthly Summary")
+            
+            monthly = filtered_df.copy()
+            monthly['Month'] = monthly['PostedDate_parsed'].dt.to_period('M')
+            monthly_summary = monthly.groupby('Month').agg({
+                'NoticeID': 'count',
+                'PopCountry': 'nunique',
+                'Department': 'nunique'
+            }).reset_index()
+            monthly_summary.columns = ['Month', 'Opportunities', 'Countries', 'Agencies']
+            monthly_summary['Month'] = monthly_summary['Month'].astype(str)
+            
+            st.dataframe(
+                monthly_summary.sort_values('Month', ascending=False).head(12),
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No temporal data available")
+    
+    with tab3:
+        st.subheader("Agency Analysis")
+        
+        if not filtered_df.empty:
+            # Agency chart
+            agency_fig = create_agency_chart(filtered_df)
+            st.plotly_chart(agency_fig, use_container_width=True)
+            
+            # Agency statistics table
+            st.subheader("Agency Statistics")
+            
+            agency_stats = filtered_df.groupby('Department').agg({
+                'NoticeID': 'count',
+                'PopCountry': lambda x: len(x.unique()),
+                'PostedDate': 'max'
+            }).reset_index()
+            agency_stats.columns = ['Agency', 'Opportunities', 'Countries', 'Last Post']
+            agency_stats = agency_stats.sort_values('Opportunities', ascending=False).head(20)
+            
+            st.dataframe(
+                agency_stats,
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No agency data available")
+    
+    with tab4:
+        st.subheader("Detailed Contract Data")
+        
+        if not filtered_df.empty:
+            # Display controls
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                search_term = st.text_input(
+                    "Search in titles and descriptions",
+                    placeholder="Enter keywords..."
+                )
+            
+            with col2:
+                show_count = st.selectbox(
+                    "Show rows",
+                    [25, 50, 100, 200],
+                    index=1
+                )
+            
+            # Apply search filter
+            display_df = filtered_df.copy()
+            
+            if search_term:
+                mask = (
+                    display_df['Title'].str.contains(search_term, case=False, na=False) |
+                    display_df['Description'].str.contains(search_term, case=False, na=False)
+                )
+                display_df = display_df[mask]
+            
+            # Prepare display columns
+            display_cols = [
+                'PostedDate', 'Title', 'Department', 'PopCountry',
+                'Type', 'Link'
+            ]
+            
+            # Ensure columns exist
+            for col in display_cols:
+                if col not in display_df.columns:
+                    display_df[col] = ''
+            
+            # Sort and limit
+            display_df = display_df.sort_values('PostedDate', ascending=False).head(show_count)
+            
+            # Create clickable links
+            if 'Link' in display_df.columns:
+                display_df['Link'] = display_df['Link'].apply(
+                    lambda x: f'<a href="{x}" target="_blank">View on SAM.gov</a>' 
+                    if x and str(x) != 'nan' else ''
+                )
+            
+            # Display table
+            st.markdown(
+                display_df[display_cols].to_html(escape=False, index=False),
+                unsafe_allow_html=True
+            )
+            
+            # Download button
+            csv = display_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download as CSV",
+                data=csv,
+                file_name=f"sam_africa_contracts_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+            
+        else:
+            st.info("No data available for selected filters")
+    
+    # Footer
+    st.divider()
+    
+    with st.expander("📊 System Information"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            **Database Location:** `{system.config.db_path}`  
+            **Last Update:** {stats.get('last_update', 'Unknown')}  
+            **Total Records:** {stats['total_records']:,}  
+            **Database Size:** {stats['size_mb']:.1f} MB
+            """)
+        
+        with col2:
+            st.markdown("""
+            **Top 5 Countries:**
+            """)
+            for country, count in list(stats['by_country'].items())[:5]:
+                st.markdown(f"- {country}: {count:,}")
 
 if __name__ == "__main__":
     main()

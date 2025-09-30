@@ -1,487 +1,289 @@
 #!/usr/bin/env python3
 """
-bootstrap_historical.py - FIXED VERSION
-Fetches ALL historical years, properly deduplicates, and captures all African contracts
+bootstrap_historical.py - Optimized Historical Data Bootstrap
+Fetches all historical years with improved performance and error handling
 """
 
 import os
 import sys
-import sqlite3
-import datetime
+import logging
 import tempfile
-import shutil
-import re
-import hashlib
 from pathlib import Path
-from time import sleep
+from datetime import datetime
+from typing import Optional
 
-import requests
-import pandas as pd
+# Add parent directory to path if running standalone
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Complete list of 54 African countries with ISO3 codes
-AFRICAN_COUNTRIES = {
-    "ALGERIA": "DZA", "ANGOLA": "AGO", "BENIN": "BEN", "BOTSWANA": "BWA",
-    "BURKINA FASO": "BFA", "BURUNDI": "BDI", "CABO VERDE": "CPV", "CAMEROON": "CMR",
-    "CENTRAL AFRICAN REPUBLIC": "CAF", "CHAD": "TCD", "COMOROS": "COM",
-    "CONGO": "COG", "DEMOCRATIC REPUBLIC OF THE CONGO": "COD", "DJIBOUTI": "DJI",
-    "EGYPT": "EGY", "EQUATORIAL GUINEA": "GNQ", "ERITREA": "ERI", "ESWATINI": "SWZ",
-    "ETHIOPIA": "ETH", "GABON": "GAB", "GAMBIA": "GMB", "GHANA": "GHA",
-    "GUINEA": "GIN", "GUINEA-BISSAU": "GNB", "IVORY COAST": "CIV", "KENYA": "KEN",
-    "LESOTHO": "LSO", "LIBERIA": "LBR", "LIBYA": "LBY", "MADAGASCAR": "MDG",
-    "MALAWI": "MWI", "MALI": "MLI", "MAURITANIA": "MRT", "MAURITIUS": "MUS",
-    "MOROCCO": "MAR", "MOZAMBIQUE": "MOZ", "NAMIBIA": "NAM", "NIGER": "NER",
-    "NIGERIA": "NGA", "RWANDA": "RWA", "SAO TOME AND PRINCIPE": "STP",
-    "SENEGAL": "SEN", "SEYCHELLES": "SYC", "SIERRA LEONE": "SLE", "SOMALIA": "SOM",
-    "SOUTH AFRICA": "ZAF", "SOUTH SUDAN": "SSD", "SUDAN": "SDN", "TANZANIA": "TZA",
-    "TOGO": "TGO", "TUNISIA": "TUN", "UGANDA": "UGA", "ZAMBIA": "ZMB", "ZIMBABWE": "ZWE"
-}
-
-# Expanded mappings for all variations
-AFRICA_MAPPINGS = {
-    # Include all variations (lowercase for matching)
-    "algeria": "DZA", "dza": "DZA", "algérie": "DZA",
-    "angola": "AGO", "ago": "AGO",
-    "benin": "BEN", "ben": "BEN", "bénin": "BEN",
-    "botswana": "BWA", "bwa": "BWA",
-    "burkina faso": "BFA", "bfa": "BFA", "burkina": "BFA",
-    "burundi": "BDI", "bdi": "BDI",
-    "cabo verde": "CPV", "cpv": "CPV", "cape verde": "CPV",
-    "cameroon": "CMR", "cmr": "CMR", "cameroun": "CMR",
-    "central african republic": "CAF", "caf": "CAF", "car": "CAF",
-    "chad": "TCD", "tcd": "TCD", "tchad": "TCD",
-    "comoros": "COM", "com": "COM", "comores": "COM",
-    "congo": "COG", "cog": "COG", "congo-brazzaville": "COG", "congo brazzaville": "COG", "republic of congo": "COG",
-    "democratic republic of the congo": "COD", "cod": "COD", "drc": "COD", "dr congo": "COD", "congo-kinshasa": "COD", "zaire": "COD",
-    "djibouti": "DJI", "dji": "DJI",
-    "egypt": "EGY", "egy": "EGY", "misr": "EGY",
-    "equatorial guinea": "GNQ", "gnq": "GNQ",
-    "eritrea": "ERI", "eri": "ERI",
-    "eswatini": "SWZ", "swz": "SWZ", "swaziland": "SWZ",
-    "ethiopia": "ETH", "eth": "ETH",
-    "gabon": "GAB", "gab": "GAB",
-    "gambia": "GMB", "gmb": "GMB", "the gambia": "GMB",
-    "ghana": "GHA", "gha": "GHA",
-    "guinea": "GIN", "gin": "GIN", "guinée": "GIN",
-    "guinea-bissau": "GNB", "gnb": "GNB", "guinea bissau": "GNB",
-    "ivory coast": "CIV", "civ": "CIV", "côte d'ivoire": "CIV", "cote d'ivoire": "CIV", "cote divoire": "CIV",
-    "kenya": "KEN", "ken": "KEN",
-    "lesotho": "LSO", "lso": "LSO",
-    "liberia": "LBR", "lbr": "LBR",
-    "libya": "LBY", "lby": "LBY",
-    "madagascar": "MDG", "mdg": "MDG",
-    "malawi": "MWI", "mwi": "MWI",
-    "mali": "MLI", "mli": "MLI",
-    "mauritania": "MRT", "mrt": "MRT", "mauritanie": "MRT",
-    "mauritius": "MUS", "mus": "MUS", "maurice": "MUS",
-    "morocco": "MAR", "mar": "MAR", "maroc": "MAR",
-    "mozambique": "MOZ", "moz": "MOZ", "moçambique": "MOZ",
-    "namibia": "NAM", "nam": "NAM",
-    "niger": "NER", "ner": "NER",
-    "nigeria": "NGA", "nga": "NGA",
-    "rwanda": "RWA", "rwa": "RWA",
-    "são tomé and príncipe": "STP", "stp": "STP", "sao tome and principe": "STP", "são tomé": "STP",
-    "senegal": "SEN", "sen": "SEN", "sénégal": "SEN",
-    "seychelles": "SYC", "syc": "SYC",
-    "sierra leone": "SLE", "sle": "SLE",
-    "somalia": "SOM", "som": "SOM",
-    "south africa": "ZAF", "zaf": "ZAF", "rsa": "ZAF",
-    "south sudan": "SSD", "ssd": "SSD",
-    "sudan": "SDN", "sdn": "SDN",
-    "tanzania": "TZA", "tza": "TZA", "tanganyika": "TZA",
-    "togo": "TGO", "tgo": "TGO",
-    "tunisia": "TUN", "tun": "TUN", "tunisie": "TUN",
-    "uganda": "UGA", "uga": "UGA",
-    "zambia": "ZMB", "zmb": "ZMB",
-    "zimbabwe": "ZWE", "zwe": "ZWE"
-}
-
-AFRICA_ISO3 = set(AFRICAN_COUNTRIES.values())
-
-PRIMARY_CSV_URL = (
-    "https://sam.gov/api/prod/fileextractservices/v1/api/download/"
-    "Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public"
-)
-FALLBACK_CSV_URL = (
-    "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv"
+from sam_utils import (
+    get_system, Config, logger,
+    DatabaseManager, DataProcessor, HTTPClient, CSVReader
 )
 
-ARCHIVE_BASES = [
-    "https://s3.amazonaws.com/falextracts/Contract%20Opportunities/Archived%20Data",
-    "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/Archived%20Data",
-]
-ARCHIVE_FILENAME_TEMPLATE = "FY{YEAR}_archived_opportunities.csv"
+# Configure logging for this module
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
-SAM_DATA_DIR = os.environ.get("SAM_DATA_DIR")
-LOCAL_DATA_DIR = Path(SAM_DATA_DIR).expanduser().resolve() if SAM_DATA_DIR else (Path.home() / "sam_africa_data")
-DB_PATH = LOCAL_DATA_DIR / "opportunities.db"
-
-KEEP_COLUMNS = [
-    "Title","Department/Ind.Agency","Sub-Tier","Office","PostedDate","Type","PopCountry",
-    "AwardNumber","AwardDate","Award$","Awardee","PrimaryContactTitle","PrimaryContactFullName",
-    "PrimaryContactEmail","PrimaryContactPhone","OrganizationType","CountryCode","Link","Description",
-]
-
-CHUNK_SIZE = 50_000
-LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-def norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
-
-ID_CANDIDATES_NORM = {
-    "noticeid","noticeidnumber","noticeidno","documentid","solicitationnumber",
-    "solicitationid","opportunityid","referencenumber","referenceid","refid","solnumber",
-}
-
-def format_country_display(iso_code: str) -> str:
-    """Convert ISO3 to 'COUNTRY NAME (ISO3)' format"""
-    for country, code in AFRICAN_COUNTRIES.items():
-        if code == iso_code:
-            return f"{country} ({code})"
-    return iso_code
-
-def standardize_country_code(value: str) -> str:
-    """Convert any country name or code to 'COUNTRY NAME (ISO3)' format"""
-    if not value:
-        return value
+class HistoricalBootstrap:
+    """Handles historical data bootstrap with resume capability"""
     
-    cleaned = str(value).strip().lower()
-    
-    # Check if already ISO code
-    if cleaned.upper() in AFRICA_ISO3:
-        return format_country_display(cleaned.upper())
-    
-    # Try to match against mappings
-    if cleaned in AFRICA_MAPPINGS:
-        iso_code = AFRICA_MAPPINGS[cleaned]
-        return format_country_display(iso_code)
-    
-    # Check partial matches
-    for mapping_key, iso_code in AFRICA_MAPPINGS.items():
-        if mapping_key in cleaned:
-            return format_country_display(iso_code)
-    
-    return value
-
-def exists_fast(url: str) -> bool:
-    try:
-        r = requests.head(url, timeout=10)
-        return r.status_code in (200, 206, 302, 403)
-    except Exception:
-        return False
-
-def robust_get(url, *, stream=False, timeout=120, max_retries=2, backoff=3):
-    last_err = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            r = requests.get(url, stream=stream, timeout=timeout)
-            if r.status_code >= 500:
-                raise requests.HTTPError(f"{r.status_code} server error")
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            last_err = e
-            print(f"    attempt {attempt}/{max_retries} failed: {e}", flush=True)
-            if attempt < max_retries:
-                sleep(backoff * attempt)
-    raise last_err
-
-def download_to(path: Path, url: str):
-    r = robust_get(url, stream=True, timeout=120, max_retries=2)
-    with open(path, "wb") as f:
-        downloaded = 0
-        for chunk in r.iter_content(chunk_size=1024 * 1024):
-            if not chunk:
-                continue
-            f.write(chunk)
-            downloaded += len(chunk)
-            if downloaded % (5 * 1024 * 1024) < 1024 * 1024:
-                print(f"      downloaded ~{downloaded // (1024*1024)} MB …", flush=True)
-
-def ensure_db():
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL;")
-        cur.execute("PRAGMA synchronous=OFF;")
-        cur.execute("PRAGMA temp_store=MEMORY;")
-        keep_defs = ",\n        ".join([f'"{c}" TEXT' for c in KEEP_COLUMNS])
-        cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS opportunities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            "NoticeID" TEXT UNIQUE,
-            {keep_defs}
-        )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
-
-def ensure_notice_id_column(df):
-    if "NoticeID" in df.columns:
-        return df
-    normalized_map = {norm(c): c for c in df.columns}
-    for key, actual in normalized_map.items():
-        if key in ID_CANDIDATES_NORM or "noticeid" in key or "documentid" in key or "opportunityid" in key:
-            df["NoticeID"] = df[actual].astype(str)
-            return df
-    def make_hash(row):
-        parts = [
-            str(row.get("Title") or ""),
-            str(row.get("PostedDate") or ""),
-            str(row.get("Type") or ""),
-            str(row.get("Link") or ""),
-            str(row.get("AwardNumber") or ""),
-            str(row.get("CountryCode") or ""),
-            str(row.get("PopCountry") or ""),
-        ]
-        s = "|".join(parts).strip() or str(row.to_dict())
-        return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:24]
-    df["NoticeID"] = df.apply(make_hash, axis=1)
-    return df
-
-def filter_african_rows(df):
-    for c in ("PopCountry", "CountryCode"):
-        if c not in df.columns:
-            df[c] = ""
-    
-    def row_matches(row):
-        pop = str(row.get("PopCountry", "") or "").strip()
-        cc = str(row.get("CountryCode", "") or "").strip()
+    def __init__(self, start_year: int = 1998, end_year: Optional[int] = None):
+        """Initialize bootstrap with year range"""
+        self.system = get_system()
+        self.start_year = start_year
         
-        # More comprehensive matching
-        pop_lower = pop.lower()
-        cc_lower = cc.lower()
+        # Default to current fiscal year
+        if end_year is None:
+            today = datetime.today()
+            self.end_year = today.year if today.month < 10 else today.year + 1
+        else:
+            self.end_year = end_year
         
-        # Check ISO codes
-        if cc.upper() in AFRICA_ISO3 or pop.upper() in AFRICA_ISO3:
-            return True
+        # Track progress
+        self.progress_file = self.system.config.data_dir / ".bootstrap_progress.txt"
+        self.completed_years = self._load_progress()
         
-        # Check against all mappings
-        if pop_lower in AFRICA_MAPPINGS or cc_lower in AFRICA_MAPPINGS:
-            return True
-        
-        # Check partial matches for any African country
-        for country_variant in AFRICA_MAPPINGS.keys():
-            if country_variant in pop_lower or country_variant in cc_lower:
-                return True
-        
-        # Check if any ISO3 code appears in the text
-        for iso in AFRICA_ISO3:
-            if iso in pop.upper() or iso in cc.upper():
-                return True
-        
-        return False
+    def _load_progress(self) -> set:
+        """Load previously completed years"""
+        if self.progress_file.exists():
+            try:
+                with open(self.progress_file, 'r') as f:
+                    return set(map(int, f.read().strip().split(',')))
+            except:
+                pass
+        return set()
     
-    return df[df.apply(row_matches, axis=1)].copy()
-
-def deduplicate_by_notice_id(conn):
-    """Remove duplicates keeping the most recent based on PostedDate"""
-    cur = conn.cursor()
+    def _save_progress(self, year: int):
+        """Save progress after completing a year"""
+        self.completed_years.add(year)
+        with open(self.progress_file, 'w') as f:
+            f.write(','.join(map(str, sorted(self.completed_years))))
     
-    # Find duplicates and keep newest
-    cur.execute("""
-        DELETE FROM opportunities 
-        WHERE id NOT IN (
-            SELECT MIN(id) 
-            FROM opportunities 
-            GROUP BY "NoticeID"
-            HAVING COUNT(*) = 1
+    def process_archive_year(self, year: int) -> tuple[int, int]:
+        """Process a single archive year"""
+        if year in self.completed_years:
+            logger.info(f"Skipping FY{year} (already completed)")
+            return 0, 0
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Processing FY{year}")
+        logger.info(f"{'='*60}")
+        
+        # Get archive URL
+        url = self.system.get_archive_url(year)
+        if not url:
+            logger.warning(f"No archive found for FY{year}")
+            return 0, 0
+        
+        total_inserted = 0
+        total_duplicates = 0
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / f"FY{year}.csv"
             
-            UNION
+            # Download archive
+            if not self.system.http_client.download_file(url, csv_path):
+                logger.error(f"Failed to download FY{year}")
+                return 0, 0
             
-            SELECT id FROM (
-                SELECT id, "NoticeID", "PostedDate",
-                       ROW_NUMBER() OVER (PARTITION BY "NoticeID" ORDER BY "PostedDate" DESC, id DESC) as rn
-                FROM opportunities
-                WHERE "NoticeID" IN (
-                    SELECT "NoticeID" 
-                    FROM opportunities 
-                    GROUP BY "NoticeID" 
-                    HAVING COUNT(*) > 1
-                )
-            ) WHERE rn = 1
-        )
-    """)
+            # Process in chunks
+            try:
+                chunk_num = 0
+                for chunk in self.system.csv_reader.read_csv_chunks(csv_path):
+                    chunk_num += 1
+                    
+                    # Process chunk
+                    processed = self.system.data_processor.process_chunk(chunk)
+                    
+                    if processed.empty:
+                        continue
+                    
+                    # Insert to database
+                    inserted, duplicates = self.system.db_manager.insert_batch(
+                        processed, 
+                        self.system.country_manager
+                    )
+                    
+                    total_inserted += inserted
+                    total_duplicates += duplicates
+                    
+                    # Log progress every 10 chunks
+                    if chunk_num % 10 == 0:
+                        logger.info(f"  Chunk {chunk_num}: {total_inserted} inserted, "
+                                  f"{total_duplicates} duplicates")
+                
+                # Mark year as complete
+                self._save_progress(year)
+                
+                logger.info(f"FY{year} complete: {total_inserted} inserted, "
+                          f"{total_duplicates} duplicates")
+                
+            except Exception as e:
+                logger.error(f"Error processing FY{year}: {e}")
+                
+        return total_inserted, total_duplicates
     
-    deleted = cur.rowcount
-    conn.commit()
-    print(f"Removed {deleted} duplicate entries", flush=True)
-    return deleted
-
-def insert_new_rows_chunk(cur, df_chunk) -> tuple[int, int]:
-    # Standardize country codes to display format
-    if "PopCountry" in df_chunk.columns:
-        df_chunk["PopCountry"] = df_chunk["PopCountry"].apply(standardize_country_code)
-    if "CountryCode" in df_chunk.columns:
-        df_chunk["CountryCode"] = df_chunk["CountryCode"].apply(standardize_country_code)
+    def process_current_full(self) -> tuple[int, int]:
+        """Process current full CSV"""
+        logger.info(f"\n{'='*60}")
+        logger.info("Processing current full CSV")
+        logger.info(f"{'='*60}")
+        
+        url = self.system.get_current_csv_url()
+        total_inserted = 0
+        total_duplicates = 0
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "current.csv"
+            
+            # Download current CSV
+            if not self.system.http_client.download_file(url, csv_path):
+                logger.error("Failed to download current CSV")
+                return 0, 0
+            
+            # Process in chunks
+            try:
+                for chunk in self.system.csv_reader.read_csv_chunks(csv_path):
+                    # Process chunk
+                    processed = self.system.data_processor.process_chunk(chunk)
+                    
+                    if processed.empty:
+                        continue
+                    
+                    # Only insert records from last 90 days to avoid duplicates
+                    if 'PostedDate' in processed.columns:
+                        try:
+                            processed['PostedDate_parsed'] = pd.to_datetime(
+                                processed['PostedDate'], 
+                                errors='coerce'
+                            )
+                            cutoff = datetime.now() - timedelta(days=90)
+                            processed = processed[processed['PostedDate_parsed'] >= cutoff]
+                        except:
+                            pass  # Process all if date parsing fails
+                    
+                    if processed.empty:
+                        continue
+                    
+                    # Insert to database
+                    inserted, duplicates = self.system.db_manager.insert_batch(
+                        processed, 
+                        self.system.country_manager
+                    )
+                    
+                    total_inserted += inserted
+                    total_duplicates += duplicates
+                
+                logger.info(f"Current CSV complete: {total_inserted} inserted, "
+                          f"{total_duplicates} duplicates")
+                
+            except Exception as e:
+                logger.error(f"Error processing current CSV: {e}")
+                
+        return total_inserted, total_duplicates
     
-    # Preserve original Link column as-is
-    for c in KEEP_COLUMNS:
-        if c not in df_chunk.columns:
-            df_chunk[c] = None
-    if "NoticeID" not in df_chunk.columns:
-        df_chunk["NoticeID"] = None
-    df_chunk["NoticeID"] = df_chunk["NoticeID"].astype(str)
-
-    cols_for_insert = ['"NoticeID"'] + [f'"{c}"' for c in KEEP_COLUMNS]
-    placeholders = ", ".join(["?"] * len(cols_for_insert))
-    columns_sql = ", ".join(cols_for_insert)
-    sql = f"INSERT INTO opportunities ({columns_sql}) VALUES ({placeholders})"
-
-    inserted = 0
-    dupes = 0
-    for _, row in df_chunk.iterrows():
-        nid = (row.get("NoticeID") or "").strip()
-        if not nid or nid.lower() == "nan":
-            continue
-        vals = [nid] + [str(row.get(c) or "") for c in KEEP_COLUMNS]
-        try:
-            cur.execute(sql, vals)
-            inserted += 1
-        except sqlite3.IntegrityError:
-            dupes += 1
-            continue
-    return inserted, dupes
-
-def iter_csv_chunks(path: Path):
-    enc_trials = [
-        ("utf-8", "replace"),
-        ("utf-8-sig", "strict"),
-        ("cp1252", "replace"),
-        ("latin-1", "replace"),
-        ("iso-8859-1", "replace"),
-    ]
-    last_err = None
-    for enc, enc_err in enc_trials:
-        try:
-            print(f"    reading CSV in chunks (encoding={enc}, errors={enc_err}) …", flush=True)
-            iterator = pd.read_csv(
-                path,
-                dtype=str,
-                encoding=enc,
-                encoding_errors=enc_err,
-                engine="python",
-                on_bad_lines="skip",
-                chunksize=CHUNK_SIZE,
-            )
-            for chunk in iterator:
-                chunk.columns = [c.strip() for c in chunk.columns]
-                yield chunk
-            return
-        except Exception as e:
-            last_err = e
-            print(f"      failed with encoding={enc}: {e}", flush=True)
-            continue
-    raise last_err
-
-def ingest_file_into_db(path: Path, label: str):
-    total_matched = 0
-    total_inserted = 0
-    total_dupes = 0
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.cursor()
-        for i, chunk in enumerate(iter_csv_chunks(path), start=1):
-            matched = filter_african_rows(chunk)
-            if matched.empty:
-                continue
-            matched = ensure_notice_id_column(matched)
-            inserted, dupes = insert_new_rows_chunk(cur, matched)
-            total_matched += len(matched)
+    def run(self, skip_current: bool = False):
+        """Run the complete bootstrap process"""
+        start_time = datetime.now()
+        
+        logger.info("="*60)
+        logger.info("SAM.gov Historical Bootstrap - Optimized Version")
+        logger.info(f"Year range: FY{self.start_year} to FY{self.end_year}")
+        logger.info(f"Database: {self.system.config.db_path}")
+        logger.info("="*60)
+        
+        # Get initial statistics
+        initial_stats = self.system.db_manager.get_statistics()
+        logger.info(f"Initial records: {initial_stats['total_records']:,}")
+        
+        # Process historical archives
+        total_inserted = 0
+        total_duplicates = 0
+        
+        for year in range(self.start_year, self.end_year + 1):
+            inserted, duplicates = self.process_archive_year(year)
             total_inserted += inserted
-            total_dupes += dupes
-            if i % 2 == 0:
-                conn.commit()
-            if i % 10 == 0:
-                print(f"      chunk {i}: matched={len(matched)} inserted={inserted} dupes={dupes}", flush=True)
-        conn.commit()
-    finally:
-        conn.close()
-    print(f"[{label}] matched={total_matched}, inserted={total_inserted}, duplicate_skipped={total_dupes}", flush=True)
-
-def backfill_archives(start_year=1998, end_year=None):
-    if end_year is None:
-        today = datetime.date.today()
-        fy = today.year if today.month < 10 else today.year + 1
-        end_year = fy
-
-    print(f"Backfilling archives from FY{start_year} to FY{end_year} …", flush=True)
-    
-    # Check ALL years from 1998 to current (SAM.gov has data from ~2002)
-    available_years = list(range(1998, end_year + 1))
-
-    with tempfile.TemporaryDirectory() as td:
-        tmpdir = Path(td)
-        for year in available_years:
-            filename = ARCHIVE_FILENAME_TEMPLATE.format(YEAR=year)
-            print(f"\nChecking FY{year} …", flush=True)
-            found = False
-            for base in ARCHIVE_BASES:
-                url = f"{base}/{filename}"
-                print(f"  probing {url}", flush=True)
-                if not exists_fast(url):
-                    print("    not present (HEAD)", flush=True)
-                    continue
-                try:
-                    tmp = tmpdir / filename
-                    print("    exists — downloading …", flush=True)
-                    download_to(tmp, url)
-                    print("    downloaded — ingesting …", flush=True)
-                    ingest_file_into_db(tmp, f"FY{year}")
-                    found = True
-                    break
-                except Exception as e:
-                    print(f"    download/ingest failed: {e}", flush=True)
-            if not found:
-                print(f"FY{year} archive not found; skipping.", flush=True)
-
-    # After all ingestion, deduplicate
-    print("\nPerforming global deduplication…", flush=True)
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        deduplicate_by_notice_id(conn)
-        cur = conn.cursor()
-        cur.execute('PRAGMA optimize;')
-        cur.execute('VACUUM;')
-        conn.commit()
-    finally:
-        conn.close()
-    
-    print("Archive backfill complete.", flush=True)
-
-def ingest_current_full():
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td) / "ContractOpportunitiesFullCSV.csv"
-        url = os.environ.get("SAM_CSV_URL") or PRIMARY_CSV_URL
-        try:
-            print(f"Downloading current full CSV from: {url}", flush=True)
-            r = robust_get(url, stream=True, timeout=300, max_retries=3)
-        except Exception as e:
-            print(f"Primary failed ({e}); trying fallback…", flush=True)
-            r = robust_get(FALLBACK_CSV_URL, stream=True, timeout=300, max_retries=3)
-        with open(tmp, "wb") as f:
-            shutil.copyfileobj(r.raw, f)
-        ingest_file_into_db(tmp, "CURRENT")
+            total_duplicates += duplicates
+        
+        # Process current full CSV
+        if not skip_current:
+            inserted, duplicates = self.process_current_full()
+            total_inserted += inserted
+            total_duplicates += duplicates
+        
+        # Optimize database
+        logger.info("\nOptimizing database...")
+        self.system.db_manager.optimize_database()
+        
+        # Get final statistics
+        final_stats = self.system.db_manager.get_statistics()
+        
+        # Clean up progress file if all years completed
+        expected_years = set(range(self.start_year, self.end_year + 1))
+        if self.completed_years >= expected_years:
+            self.progress_file.unlink(missing_ok=True)
+        
+        # Report results
+        elapsed = datetime.now() - start_time
+        logger.info("\n" + "="*60)
+        logger.info("Bootstrap Complete!")
+        logger.info(f"Time elapsed: {elapsed}")
+        logger.info(f"Total inserted: {total_inserted:,}")
+        logger.info(f"Total duplicates: {total_duplicates:,}")
+        logger.info(f"Final records: {final_stats['total_records']:,}")
+        logger.info(f"Database size: {final_stats['size_mb']:.1f} MB")
+        logger.info("\nTop 10 countries by opportunities:")
+        
+        for country, count in list(final_stats['by_country'].items())[:10]:
+            logger.info(f"  {country}: {count:,}")
+        
+        logger.info("="*60)
 
 def main():
-    LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    ensure_db()
-
-    # Backfill ALL historical years starting from 1998
-    backfill_archives(start_year=1998, end_year=None)
+    """Main entry point"""
+    import argparse
     
-    # Ingest current
-    ingest_current_full()
+    parser = argparse.ArgumentParser(description="Bootstrap SAM.gov historical data")
+    parser.add_argument(
+        "--start-year", 
+        type=int, 
+        default=1998,
+        help="Start year for historical data (default: 1998)"
+    )
+    parser.add_argument(
+        "--end-year", 
+        type=int, 
+        default=None,
+        help="End year for historical data (default: current fiscal year)"
+    )
+    parser.add_argument(
+        "--skip-current",
+        action="store_true",
+        help="Skip processing current full CSV"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Override data directory location"
+    )
     
-    # Final deduplication
-    print("\nFinal deduplication pass…", flush=True)
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        deduplicate_by_notice_id(conn)
-    finally:
-        conn.close()
+    args = parser.parse_args()
     
-    print("Historical backfill done.", flush=True)
+    # Override config if data-dir specified
+    if args.data_dir:
+        os.environ['SAM_DATA_DIR'] = args.data_dir
+    
+    # Import pandas here to ensure it's available
+    global pd, timedelta
+    import pandas as pd
+    from datetime import timedelta
+    
+    # Run bootstrap
+    bootstrap = HistoricalBootstrap(args.start_year, args.end_year)
+    bootstrap.run(skip_current=args.skip_current)
 
 if __name__ == "__main__":
     main()

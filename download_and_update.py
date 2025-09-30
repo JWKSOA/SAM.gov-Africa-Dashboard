@@ -1,397 +1,283 @@
 #!/usr/bin/env python3
 """
-download_and_update.py - FIXED VERSION
-Daily job with proper country formatting and link preservation
+download_and_update.py - Optimized Daily Update
+Efficient incremental updates with change detection
 """
 
 import os
 import sys
-import sqlite3
-import datetime
+import logging
 import tempfile
-import shutil
-import re
 from pathlib import Path
-from time import sleep
+from datetime import datetime, timedelta
+from typing import Optional
 
-import requests
-import pandas as pd
+# Add parent directory to path if running standalone
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Complete list of 54 African countries
-AFRICAN_COUNTRIES = {
-    "ALGERIA": "DZA", "ANGOLA": "AGO", "BENIN": "BEN", "BOTSWANA": "BWA",
-    "BURKINA FASO": "BFA", "BURUNDI": "BDI", "CABO VERDE": "CPV", "CAMEROON": "CMR",
-    "CENTRAL AFRICAN REPUBLIC": "CAF", "CHAD": "TCD", "COMOROS": "COM",
-    "CONGO": "COG", "DEMOCRATIC REPUBLIC OF THE CONGO": "COD", "DJIBOUTI": "DJI",
-    "EGYPT": "EGY", "EQUATORIAL GUINEA": "GNQ", "ERITREA": "ERI", "ESWATINI": "SWZ",
-    "ETHIOPIA": "ETH", "GABON": "GAB", "GAMBIA": "GMB", "GHANA": "GHA",
-    "GUINEA": "GIN", "GUINEA-BISSAU": "GNB", "IVORY COAST": "CIV", "KENYA": "KEN",
-    "LESOTHO": "LSO", "LIBERIA": "LBR", "LIBYA": "LBY", "MADAGASCAR": "MDG",
-    "MALAWI": "MWI", "MALI": "MLI", "MAURITANIA": "MRT", "MAURITIUS": "MUS",
-    "MOROCCO": "MAR", "MOZAMBIQUE": "MOZ", "NAMIBIA": "NAM", "NIGER": "NER",
-    "NIGERIA": "NGA", "RWANDA": "RWA", "SAO TOME AND PRINCIPE": "STP",
-    "SENEGAL": "SEN", "SEYCHELLES": "SYC", "SIERRA LEONE": "SLE", "SOMALIA": "SOM",
-    "SOUTH AFRICA": "ZAF", "SOUTH SUDAN": "SSD", "SUDAN": "SDN", "TANZANIA": "TZA",
-    "TOGO": "TGO", "TUNISIA": "TUN", "UGANDA": "UGA", "ZAMBIA": "ZMB", "ZIMBABWE": "ZWE"
-}
+from sam_utils import get_system, Config, logger
 
-# Mapping variations
-AFRICA_MAPPINGS = {
-    "algeria": "DZA", "dza": "DZA", "algérie": "DZA",
-    "angola": "AGO", "ago": "AGO",
-    "benin": "BEN", "ben": "BEN", "bénin": "BEN",
-    "botswana": "BWA", "bwa": "BWA",
-    "burkina faso": "BFA", "bfa": "BFA", "burkina": "BFA",
-    "burundi": "BDI", "bdi": "BDI",
-    "cabo verde": "CPV", "cpv": "CPV", "cape verde": "CPV",
-    "cameroon": "CMR", "cmr": "CMR", "cameroun": "CMR",
-    "central african republic": "CAF", "caf": "CAF", "car": "CAF",
-    "chad": "TCD", "tcd": "TCD", "tchad": "TCD",
-    "comoros": "COM", "com": "COM", "comores": "COM",
-    "congo": "COG", "cog": "COG", "congo-brazzaville": "COG", "republic of congo": "COG",
-    "democratic republic of the congo": "COD", "cod": "COD", "drc": "COD", "dr congo": "COD", "congo-kinshasa": "COD",
-    "djibouti": "DJI", "dji": "DJI",
-    "egypt": "EGY", "egy": "EGY",
-    "equatorial guinea": "GNQ", "gnq": "GNQ",
-    "eritrea": "ERI", "eri": "ERI",
-    "eswatini": "SWZ", "swz": "SWZ", "swaziland": "SWZ",
-    "ethiopia": "ETH", "eth": "ETH",
-    "gabon": "GAB", "gab": "GAB",
-    "gambia": "GMB", "gmb": "GMB", "the gambia": "GMB",
-    "ghana": "GHA", "gha": "GHA",
-    "guinea": "GIN", "gin": "GIN", "guinée": "GIN",
-    "guinea-bissau": "GNB", "gnb": "GNB", "guinea bissau": "GNB",
-    "ivory coast": "CIV", "civ": "CIV", "côte d'ivoire": "CIV", "cote d'ivoire": "CIV",
-    "kenya": "KEN", "ken": "KEN",
-    "lesotho": "LSO", "lso": "LSO",
-    "liberia": "LBR", "lbr": "LBR",
-    "libya": "LBY", "lby": "LBY",
-    "madagascar": "MDG", "mdg": "MDG",
-    "malawi": "MWI", "mwi": "MWI",
-    "mali": "MLI", "mli": "MLI",
-    "mauritania": "MRT", "mrt": "MRT",
-    "mauritius": "MUS", "mus": "MUS",
-    "morocco": "MAR", "mar": "MAR", "maroc": "MAR",
-    "mozambique": "MOZ", "moz": "MOZ",
-    "namibia": "NAM", "nam": "NAM",
-    "niger": "NER", "ner": "NER",
-    "nigeria": "NGA", "nga": "NGA",
-    "rwanda": "RWA", "rwa": "RWA",
-    "são tomé and príncipe": "STP", "stp": "STP", "sao tome and principe": "STP",
-    "senegal": "SEN", "sen": "SEN", "sénégal": "SEN",
-    "seychelles": "SYC", "syc": "SYC",
-    "sierra leone": "SLE", "sle": "SLE",
-    "somalia": "SOM", "som": "SOM",
-    "south africa": "ZAF", "zaf": "ZAF", "rsa": "ZAF",
-    "south sudan": "SSD", "ssd": "SSD",
-    "sudan": "SDN", "sdn": "SDN",
-    "tanzania": "TZA", "tza": "TZA",
-    "togo": "TGO", "tgo": "TGO",
-    "tunisia": "TUN", "tun": "TUN", "tunisie": "TUN",
-    "uganda": "UGA", "uga": "UGA",
-    "zambia": "ZMB", "zmb": "ZMB",
-    "zimbabwe": "ZWE", "zwe": "ZWE"
-}
-
-AFRICA_ISO3 = set(AFRICAN_COUNTRIES.values())
-
-PRIMARY_CSV_URL = (
-    "https://sam.gov/api/prod/fileextractservices/v1/api/download/"
-    "Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public"
-)
-FALLBACK_CSV_URL = (
-    "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv"
+# Configure logging for this module
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-SAM_DATA_DIR = os.environ.get("SAM_DATA_DIR")
-LOCAL_DATA_DIR = Path(SAM_DATA_DIR).expanduser().resolve() if SAM_DATA_DIR else (Path.home() / "sam_africa_data")
-DB_PATH = LOCAL_DATA_DIR / "opportunities.db"
-
-CHUNK_SIZE = 50_000
-LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-CI_MODE = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
-
-def norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
-
-ID_CANDIDATES_NORM = {
-    "noticeid","noticeidnumber","noticeidno","documentid","solicitationnumber",
-    "solicitationid","opportunityid","referencenumber","referenceid","refid","solnumber",
-}
-
-def format_country_display(iso_code: str) -> str:
-    """Convert ISO3 to 'COUNTRY NAME (ISO3)' format"""
-    for country, code in AFRICAN_COUNTRIES.items():
-        if code == iso_code:
-            return f"{country} ({code})"
-    return iso_code
-
-def standardize_country_code(value: str) -> str:
-    """Convert any country name or code to 'COUNTRY NAME (ISO3)' format"""
-    if not value:
-        return value
+class DailyUpdater:
+    """Handles efficient daily incremental updates"""
     
-    cleaned = str(value).strip().lower()
-    
-    # Check if already ISO code
-    if cleaned.upper() in AFRICA_ISO3:
-        return format_country_display(cleaned.upper())
-    
-    # Try to match against mappings
-    if cleaned in AFRICA_MAPPINGS:
-        iso_code = AFRICA_MAPPINGS[cleaned]
-        return format_country_display(iso_code)
-    
-    # Check partial matches
-    for mapping_key, iso_code in AFRICA_MAPPINGS.items():
-        if mapping_key in cleaned:
-            return format_country_display(iso_code)
-    
-    return value
-
-def robust_get(url, *, stream=False, timeout=300, max_retries=3, backoff=3):
-    last_err = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            r = requests.get(url, stream=stream, timeout=timeout)
-            if r.status_code >= 500:
-                raise requests.HTTPError(f"{r.status_code} server error")
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            last_err = e
-            if attempt < max_retries:
-                sleep(backoff * attempt)
-            else:
-                raise last_err
-
-def resolve_csv_url():
-    env_url = os.environ.get("SAM_CSV_URL")
-    if env_url:
-        return env_url
-    try:
-        _ = robust_get(PRIMARY_CSV_URL, stream=True, timeout=60, max_retries=2)
-        return PRIMARY_CSV_URL
-    except Exception:
-        return FALLBACK_CSV_URL
-
-def download_csv(url, dest_path: Path):
-    print(f"Downloading CSV from: {url}")
-    r = robust_get(url, stream=True, timeout=300, max_retries=3)
-    with open(dest_path, "wb") as f:
-        shutil.copyfileobj(r.raw, f)
-    print(f"Saved CSV to temp: {dest_path}")
-
-def ensure_db():
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL;")
-        cur.execute("PRAGMA synchronous=OFF;")
-        cur.execute("PRAGMA temp_store=MEMORY;")
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS opportunities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            "NoticeID" TEXT UNIQUE,
-            "Title" TEXT,
-            "Department/Ind.Agency" TEXT,
-            "Sub-Tier" TEXT,
-            "Office" TEXT,
-            "PostedDate" TEXT,
-            "Type" TEXT,
-            "PopCountry" TEXT,
-            "AwardNumber" TEXT,
-            "AwardDate" TEXT,
-            "Award$" TEXT,
-            "Awardee" TEXT,
-            "PrimaryContactTitle" TEXT,
-            "PrimaryContactFullName" TEXT,
-            "PrimaryContactEmail" TEXT,
-            "PrimaryContactPhone" TEXT,
-            "OrganizationType" TEXT,
-            "CountryCode" TEXT,
-            "Link" TEXT,
-            "Description" TEXT
-        )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
-
-def insert_new_rows_chunk(cur, df_chunk) -> int:
-    keep_cols = [
-        "Title","Department/Ind.Agency","Sub-Tier","Office","PostedDate","Type","PopCountry",
-        "AwardNumber","AwardDate","Award$","Awardee","PrimaryContactTitle","PrimaryContactFullName",
-        "PrimaryContactEmail","PrimaryContactPhone","OrganizationType","CountryCode","Link","Description",
-    ]
-    
-    # Standardize country codes to display format
-    if "PopCountry" in df_chunk.columns:
-        df_chunk["PopCountry"] = df_chunk["PopCountry"].apply(standardize_country_code)
-    if "CountryCode" in df_chunk.columns:
-        df_chunk["CountryCode"] = df_chunk["CountryCode"].apply(standardize_country_code)
-    
-    # Ensure kept columns exist
-    for c in keep_cols:
-        if c not in df_chunk.columns:
-            df_chunk[c] = None
-    if "NoticeID" not in df_chunk.columns:
-        df_chunk["NoticeID"] = None
-
-    df_chunk["NoticeID"] = df_chunk["NoticeID"].astype(str)
-
-    cols_for_insert = ['"NoticeID"'] + [f'"{c}"' for c in keep_cols]
-    placeholders = ", ".join(["?"] * len(cols_for_insert))
-    columns_sql = ", ".join(cols_for_insert)
-    sql = f"INSERT INTO opportunities ({columns_sql}) VALUES ({placeholders})"
-
-    inserted = 0
-    for _, row in df_chunk.iterrows():
-        nid = (row.get("NoticeID") or "").strip()
-        if not nid or nid.lower() == "nan":
-            continue
-        vals = [nid] + [str(row.get(c) or "") for c in keep_cols]
-        try:
-            cur.execute(sql, vals)
-            inserted += 1
-        except sqlite3.IntegrityError:
-            continue
-    return inserted
-
-def filter_african_rows(df):
-    for c in ("PopCountry", "CountryCode"):
-        if c not in df.columns:
-            df[c] = ""
-    
-    def row_matches(row):
-        pop = str(row.get("PopCountry", "") or "").strip()
-        cc = str(row.get("CountryCode", "") or "").strip()
+    def __init__(self, lookback_days: int = 7):
+        """Initialize updater with lookback period"""
+        self.system = get_system()
+        self.lookback_days = lookback_days
         
-        pop_lower = pop.lower()
-        cc_lower = cc.lower()
+    def get_cutoff_date(self) -> datetime:
+        """Determine cutoff date for processing"""
+        # Get last update from database
+        last_update = self.system.db_manager.get_last_update_date()
         
-        # Check ISO codes
-        if cc.upper() in AFRICA_ISO3 or pop.upper() in AFRICA_ISO3:
-            return True
+        if last_update:
+            # Add buffer to catch any delayed postings
+            cutoff = last_update - timedelta(days=self.lookback_days)
+        else:
+            # No data in DB, get last 30 days
+            cutoff = datetime.now() - timedelta(days=30)
         
-        # Check against all mappings
-        if pop_lower in AFRICA_MAPPINGS or cc_lower in AFRICA_MAPPINGS:
-            return True
-        
-        # Check partial matches
-        for country_variant in AFRICA_MAPPINGS.keys():
-            if country_variant in pop_lower or country_variant in cc_lower:
-                return True
-        
-        # Check ISO codes in text
-        for iso in AFRICA_ISO3:
-            if iso in pop.upper() or iso in cc.upper():
-                return True
-        
-        return False
+        logger.info(f"Processing records posted after {cutoff.date()}")
+        return cutoff
     
-    return df[df.apply(row_matches, axis=1)].copy()
-
-def ensure_notice_id_column(df):
-    if "NoticeID" in df.columns:
-        return df
-    normalized_map = {norm(c): c for c in df.columns}
-    for key, actual in normalized_map.items():
-        if key in ID_CANDIDATES_NORM or "noticeid" in key or "documentid" in key or "opportunityid" in key:
-            df["NoticeID"] = df[actual].astype(str)
-            return df
-    import hashlib
-    def make_hash(row):
-        parts = [
-            str(row.get("Title") or ""),
-            str(row.get("PostedDate") or ""),
-            str(row.get("Type") or ""),
-            str(row.get("Link") or ""),
-            str(row.get("AwardNumber") or ""),
-            str(row.get("CountryCode") or ""),
-            str(row.get("PopCountry") or ""),
-        ]
-        s = "|".join(parts).strip() or str(row.to_dict())
-        return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()[:24]
-    df["NoticeID"] = df.apply(make_hash, axis=1)
-    return df
-
-def iter_csv_chunks(path: Path):
-    enc_trials = [
-        ("utf-8", "replace"),
-        ("utf-8-sig", "strict"),
-        ("cp1252", "replace"),
-        ("latin-1", "replace"),
-    ]
-    last_err = None
-    for enc, enc_err in enc_trials:
-        try:
-            print(f"Reading CSV in chunks with encoding={enc}, errors={enc_err} ...")
-            iterator = pd.read_csv(
-                path,
-                dtype=str,
-                encoding=enc,
-                encoding_errors=enc_err,
-                engine="python",
-                on_bad_lines="skip",
-                chunksize=CHUNK_SIZE,
-            )
-            for chunk in iterator:
-                chunk.columns = [c.strip() for c in chunk.columns]
-                yield chunk
+    def process_incremental(self) -> tuple[int, int]:
+        """Process only new/recent records"""
+        url = self.system.get_current_csv_url()
+        cutoff_date = self.get_cutoff_date()
+        
+        total_inserted = 0
+        total_duplicates = 0
+        total_processed = 0
+        total_skipped = 0
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "current.csv"
+            
+            # Download current CSV
+            logger.info("Downloading current opportunities CSV...")
+            if not self.system.http_client.download_file(url, csv_path):
+                logger.error("Failed to download current CSV")
+                return 0, 0
+            
+            # Process in chunks with date filtering
+            logger.info("Processing CSV chunks...")
+            
+            try:
+                # Import pandas here
+                import pandas as pd
+                
+                chunk_num = 0
+                for chunk in self.system.csv_reader.read_csv_chunks(csv_path):
+                    chunk_num += 1
+                    
+                    # Early date filtering if PostedDate exists
+                    if 'PostedDate' in chunk.columns:
+                        try:
+                            chunk['PostedDate_parsed'] = pd.to_datetime(
+                                chunk['PostedDate'], 
+                                errors='coerce'
+                            )
+                            
+                            # Skip old records
+                            before_filter = len(chunk)
+                            chunk = chunk[
+                                (chunk['PostedDate_parsed'] >= cutoff_date) | 
+                                (chunk['PostedDate_parsed'].isna())
+                            ]
+                            
+                            skipped = before_filter - len(chunk)
+                            if skipped > 0:
+                                total_skipped += skipped
+                                
+                            if chunk.empty:
+                                continue
+                                
+                        except Exception as e:
+                            logger.warning(f"Date filtering failed: {e}")
+                    
+                    # Process chunk (filter for African countries)
+                    processed = self.system.data_processor.process_chunk(chunk)
+                    
+                    if processed.empty:
+                        continue
+                    
+                    total_processed += len(processed)
+                    
+                    # Insert to database
+                    inserted, duplicates = self.system.db_manager.insert_batch(
+                        processed, 
+                        self.system.country_manager
+                    )
+                    
+                    total_inserted += inserted
+                    total_duplicates += duplicates
+                    
+                    # Log progress every 5 chunks
+                    if chunk_num % 5 == 0:
+                        logger.info(
+                            f"  Progress: Chunk {chunk_num}, "
+                            f"{total_processed} African records found, "
+                            f"{total_inserted} new, {total_skipped} old skipped"
+                        )
+                
+                logger.info(
+                    f"\nUpdate complete: "
+                    f"{total_processed} African records processed, "
+                    f"{total_inserted} new inserted, "
+                    f"{total_duplicates} duplicates skipped, "
+                    f"{total_skipped} old records skipped"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error processing CSV: {e}")
+                raise
+                
+        return total_inserted, total_duplicates
+    
+    def cleanup_old_data(self, days_to_keep: int = 1825):  # 5 years default
+        """Remove very old data to prevent database bloat"""
+        cutoff = datetime.now() - timedelta(days=days_to_keep)
+        
+        with self.system.db_manager.get_connection() as conn:
+            cur = conn.cursor()
+            
+            # Count records to be deleted
+            cur.execute("""
+                SELECT COUNT(*) FROM opportunities 
+                WHERE date(PostedDate) < date(?)
+            """, (cutoff.isoformat(),))
+            
+            count = cur.fetchone()[0]
+            
+            if count > 0:
+                logger.info(f"Removing {count} records older than {cutoff.date()}")
+                
+                cur.execute("""
+                    DELETE FROM opportunities 
+                    WHERE date(PostedDate) < date(?)
+                """, (cutoff.isoformat(),))
+                
+                conn.commit()
+    
+    def run(self, optimize: bool = True, cleanup: bool = False):
+        """Run the daily update process"""
+        start_time = datetime.now()
+        
+        logger.info("="*60)
+        logger.info("SAM.gov Daily Update - Optimized Version")
+        logger.info(f"Database: {self.system.config.db_path}")
+        logger.info("="*60)
+        
+        # Get initial statistics
+        initial_stats = self.system.db_manager.get_statistics()
+        logger.info(f"Initial records: {initial_stats['total_records']:,}")
+        logger.info(f"Recent records (30d): {initial_stats['recent_records']:,}")
+        
+        # Check cache for recent run
+        cache_key = f"daily_update_{datetime.now().date()}"
+        cached = self.system.cache_manager.get(cache_key, max_age=timedelta(hours=20))
+        
+        if cached and not os.environ.get('FORCE_UPDATE'):
+            logger.info("Already updated today (use FORCE_UPDATE=1 to override)")
             return
-        except Exception as e:
-            last_err = e
-            print(f"  Failed with encoding={enc}: {e}")
-            continue
-    raise last_err
+        
+        # Process incremental updates
+        inserted, duplicates = self.process_incremental()
+        
+        # Optional cleanup of old data
+        if cleanup:
+            self.cleanup_old_data()
+        
+        # Optimize database if needed
+        if optimize and inserted > 100:
+            logger.info("\nOptimizing database...")
+            self.system.db_manager.optimize_database()
+        
+        # Get final statistics
+        final_stats = self.system.db_manager.get_statistics()
+        
+        # Cache successful run
+        self.system.cache_manager.set(cache_key, {
+            'inserted': inserted,
+            'duplicates': duplicates,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        # Report results
+        elapsed = datetime.now() - start_time
+        logger.info("\n" + "="*60)
+        logger.info("Daily Update Complete!")
+        logger.info(f"Time elapsed: {elapsed}")
+        logger.info(f"New records: {inserted:,}")
+        logger.info(f"Duplicates skipped: {duplicates:,}")
+        logger.info(f"Total records: {final_stats['total_records']:,}")
+        logger.info(f"Database size: {final_stats['size_mb']:.1f} MB")
+        
+        # Show changes by country if any inserts
+        if inserted > 0:
+            logger.info("\nNew records by country:")
+            
+            # Compare before/after stats
+            for country in final_stats['by_country']:
+                before = initial_stats['by_country'].get(country, 0)
+                after = final_stats['by_country'][country]
+                diff = after - before
+                if diff > 0:
+                    logger.info(f"  {country}: +{diff}")
+        
+        logger.info("="*60)
 
 def main():
-    ensure_db()
-
-    csv_url = resolve_csv_url()
-    today = datetime.date.today()
-
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td) / "ContractOpportunitiesFullCSV.csv"
-        try:
-            download_csv(csv_url, tmp)
-        except Exception as e:
-            print("Failed to download CSV:", e)
-            sys.exit(1)
-
-        total_matched = 0
-        total_inserted = 0
-
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            cur = conn.cursor()
-            for chunk in iter_csv_chunks(tmp):
-                matched = filter_african_rows(chunk)
-                if matched.empty:
-                    continue
-                matched = ensure_notice_id_column(matched)
-                inserted = insert_new_rows_chunk(cur, matched)
-                total_matched += len(matched)
-                total_inserted += inserted
-            conn.commit()
-            cur.execute('PRAGMA optimize;')
-            cur.execute('VACUUM;')
-            conn.commit()
-        finally:
-            conn.close()
-
-        print(f"Found {total_matched} rows that reference African countries.")
-        print(f"Inserted {total_inserted} new rows into DB.")
-
-        if CI_MODE:
-            print("CI mode: NOT saving the raw CSV in the repo.")
-        else:
-            dest = LOCAL_DATA_DIR / f"ContractOpportunitiesFullCSV_{today.strftime('%m_%d_%Y')}.csv"
-            shutil.copyfile(tmp, dest)
-            print(f"Saved a copy locally at {dest} (NOT committed to git).")
-
-    print("Done.")
+    """Main entry point"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Daily SAM.gov data update")
+    parser.add_argument(
+        "--lookback-days", 
+        type=int, 
+        default=7,
+        help="Number of days to look back for updates (default: 7)"
+    )
+    parser.add_argument(
+        "--no-optimize",
+        action="store_true",
+        help="Skip database optimization"
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Remove records older than 5 years"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Override data directory location"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force update even if already run today"
+    )
+    
+    args = parser.parse_args()
+    
+    # Override config if specified
+    if args.data_dir:
+        os.environ['SAM_DATA_DIR'] = args.data_dir
+    
+    if args.force:
+        os.environ['FORCE_UPDATE'] = '1'
+    
+    # Run updater
+    updater = DailyUpdater(lookback_days=args.lookback_days)
+    updater.run(optimize=not args.no_optimize, cleanup=args.cleanup)
 
 if __name__ == "__main__":
     main()

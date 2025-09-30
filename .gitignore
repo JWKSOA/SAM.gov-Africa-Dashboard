@@ -1,25 +1,87 @@
-.streamlit/
-.streamlit/
-__pycache__/
-*.pyc
-# Large raw extracts — never commit
-data/*.csv
-data/*.zip
-data/*.gz
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Jupyter / temp
-.ipynb_checkpoints/
-*.tmp
-*.temp
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# Large raw extracts — never commit
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
+*.log
+
+# Data files (never commit raw CSVs)
 data/*.csv
 data/*.zip
 data/*.gz
+data/*.tar
+data/*.csv.*
 
-# OS/editor noise
-.DS_Store
-.vscode/
+# Cache
+data/.cache/
+.cache/
+*.cache
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Log files
+*.log
+logs/
+
+# Environment files (keep .env.example)
+.env
+.env.local
+
+# Progress tracking
+data/.bootstrap_progress.txt
+data/.last_ids.json
+
+# Keep the data directory but not large files
+!data/.gitkeep
+
+# Database files over 50MB should use Git LFS
+# (configured dynamically in GitHub Action)
