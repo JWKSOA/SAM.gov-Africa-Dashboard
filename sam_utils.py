@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 sam_utils.py - Shared utilities for SAM.gov data processing
-Eliminates code duplication and provides centralized functionality
+Fixed version with Streamlit Cloud database detection
 """
 
 import os
@@ -32,14 +32,67 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION
 # ============================================================================
 
+def find_database_path() -> Path:
+    """Find the database file, checking multiple locations"""
+    
+    # List of possible database locations in priority order
+    possible_paths = [
+        # 1. Check if running on Streamlit Cloud with mounted volume
+        Path("/mount/src/sam.gov-africa-dashboard/data/opportunities.db"),
+        
+        # 2. Check current directory structure (for Streamlit Cloud)
+        Path("data/opportunities.db"),
+        
+        # 3. Check if SAM_DATA_DIR environment variable is set
+        Path(os.environ.get('SAM_DATA_DIR', '')) / "opportunities.db" if os.environ.get('SAM_DATA_DIR') else None,
+        
+        # 4. Check home directory location (local development)
+        Path.home() / "sam_africa_data" / "opportunities.db",
+        
+        # 5. Check parent directory
+        Path("../data/opportunities.db"),
+        
+        # 6. Check absolute path for Streamlit Cloud
+        Path("/app/data/opportunities.db"),
+    ]
+    
+    # Remove None values
+    possible_paths = [p for p in possible_paths if p]
+    
+    # Find first existing database
+    for path in possible_paths:
+        if path.exists():
+            # Check if it's a real database file (not Git LFS pointer)
+            try:
+                # Git LFS pointer files are very small (< 1KB)
+                if path.stat().st_size > 1000:
+                    # Try to connect to verify it's a valid database
+                    conn = sqlite3.connect(str(path))
+                    conn.execute("SELECT COUNT(*) FROM opportunities LIMIT 1")
+                    conn.close()
+                    logger.info(f"Found valid database at: {path}")
+                    return path
+                else:
+                    logger.warning(f"Found Git LFS pointer at {path}, not actual database")
+            except Exception as e:
+                logger.warning(f"Invalid database at {path}: {e}")
+                continue
+    
+    # If no database found, return default path (will need to be created)
+    default_path = Path("data") / "opportunities.db"
+    logger.warning(f"No valid database found, using default: {default_path}")
+    return default_path
+
 @dataclass
 class Config:
     """Centralized configuration for SAM.gov data processing"""
     
-    # Paths
-    db_path: Path = field(default_factory=lambda: Path.home() / "sam_africa_data" / "opportunities.db")
-    data_dir: Path = field(default_factory=lambda: Path.home() / "sam_africa_data")
-    cache_dir: Path = field(default_factory=lambda: Path.home() / "sam_africa_data" / ".cache")
+    # Dynamically find database path
+    db_path: Path = field(default_factory=find_database_path)
+    
+    # Set data_dir based on db_path
+    data_dir: Path = field(init=False)
+    cache_dir: Path = field(init=False)
     
     # Processing
     chunk_size: int = 50_000
@@ -68,9 +121,16 @@ class Config:
     ])
     
     def __post_init__(self):
-        """Create necessary directories"""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        """Set derived paths and create necessary directories"""
+        self.data_dir = self.db_path.parent
+        self.cache_dir = self.data_dir / ".cache"
+        
+        # Only create directories if we have write access
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            logger.warning(f"Cannot create directories at {self.data_dir} (read-only filesystem?)")
 
 # ============================================================================
 # AFRICAN COUNTRIES DATA
@@ -284,12 +344,20 @@ class DatabaseManager:
         self.config = config
         self.db_path = config.db_path
         
+        # Check if database exists and is valid
+        if not self.db_path.exists():
+            logger.error(f"Database not found at {self.db_path}")
+            logger.info("Please run bootstrap_historical.py or download_and_update.py to create database")
+        elif self.db_path.stat().st_size < 1000:
+            logger.error(f"Database at {self.db_path} appears to be a Git LFS pointer, not actual database")
+            logger.info("Database needs to be properly downloaded or created")
+        
     @contextmanager
     def get_connection(self):
         """Context manager for database connections"""
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(str(self.db_path))
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA temp_store=MEMORY")
@@ -307,6 +375,10 @@ class DatabaseManager:
     
     def initialize_database(self):
         """Create tables and indexes if they don't exist"""
+        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
+            logger.warning(f"Cannot initialize database - file missing or invalid at {self.db_path}")
+            return
+            
         with self.get_connection() as conn:
             cur = conn.cursor()
             
@@ -353,6 +425,9 @@ class DatabaseManager:
     
     def get_last_update_date(self) -> Optional[datetime]:
         """Get the most recent PostedDate from database"""
+        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
+            return None
+            
         with self.get_connection() as conn:
             cur = conn.cursor()
             result = cur.execute("""
@@ -371,6 +446,10 @@ class DatabaseManager:
     def insert_batch(self, df: pd.DataFrame, country_manager: CountryManager) -> Tuple[int, int]:
         """Insert batch of records with deduplication"""
         if df.empty:
+            return 0, 0
+        
+        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
+            logger.error("Cannot insert - database not available")
             return 0, 0
             
         # Standardize country codes
@@ -419,6 +498,9 @@ class DatabaseManager:
     
     def optimize_database(self):
         """Optimize database performance"""
+        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
+            return
+            
         with self.get_connection() as conn:
             cur = conn.cursor()
             
@@ -443,39 +525,65 @@ class DatabaseManager:
             
     def get_statistics(self) -> Dict[str, Any]:
         """Get database statistics"""
-        with self.get_connection() as conn:
-            cur = conn.cursor()
+        if not self.db_path.exists():
+            return {
+                'total_records': 0,
+                'by_country': {},
+                'recent_records': 0,
+                'size_mb': 0,
+                'error': 'Database not found'
+            }
+        
+        if self.db_path.stat().st_size < 1000:
+            return {
+                'total_records': 0,
+                'by_country': {},
+                'recent_records': 0,
+                'size_mb': 0,
+                'error': 'Database is Git LFS pointer - needs proper download'
+            }
             
-            stats = {}
-            
-            # Total records
-            cur.execute("SELECT COUNT(*) FROM opportunities")
-            stats['total_records'] = cur.fetchone()[0]
-            
-            # Records by country
-            cur.execute("""
-                SELECT PopCountry, COUNT(*) 
-                FROM opportunities 
-                WHERE PopCountry IS NOT NULL 
-                GROUP BY PopCountry 
-                ORDER BY COUNT(*) DESC
-            """)
-            stats['by_country'] = dict(cur.fetchall())
-            
-            # Recent records (last 30 days)
-            cur.execute("""
-                SELECT COUNT(*) 
-                FROM opportunities 
-                WHERE date(PostedDate) >= date('now', '-30 days')
-            """)
-            stats['recent_records'] = cur.fetchone()[0]
-            
-            # Database size
-            cur.execute("PRAGMA page_count")
-            page_count = cur.fetchone()[0]
-            stats['size_mb'] = (page_count * 4096) / (1024 * 1024)
-            
-            return stats
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                
+                stats = {}
+                
+                # Total records
+                cur.execute("SELECT COUNT(*) FROM opportunities")
+                stats['total_records'] = cur.fetchone()[0]
+                
+                # Records by country
+                cur.execute("""
+                    SELECT PopCountry, COUNT(*) 
+                    FROM opportunities 
+                    WHERE PopCountry IS NOT NULL 
+                    GROUP BY PopCountry 
+                    ORDER BY COUNT(*) DESC
+                """)
+                stats['by_country'] = dict(cur.fetchall())
+                
+                # Recent records (last 30 days)
+                cur.execute("""
+                    SELECT COUNT(*) 
+                    FROM opportunities 
+                    WHERE date(PostedDate) >= date('now', '-30 days')
+                """)
+                stats['recent_records'] = cur.fetchone()[0]
+                
+                # Database size
+                stats['size_mb'] = self.db_path.stat().st_size / (1024 * 1024)
+                
+                return stats
+        except Exception as e:
+            logger.error(f"Error getting statistics: {e}")
+            return {
+                'total_records': 0,
+                'by_country': {},
+                'recent_records': 0,
+                'size_mb': 0,
+                'error': str(e)
+            }
 
 # ============================================================================
 # DATA PROCESSING
@@ -698,7 +806,10 @@ class CacheManager:
     
     def __init__(self, config: Config):
         self.cache_dir = config.cache_dir
-        self.cache_dir.mkdir(exist_ok=True)
+        try:
+            self.cache_dir.mkdir(exist_ok=True)
+        except:
+            logger.warning(f"Cannot create cache directory at {self.cache_dir}")
     
     def get_cache_path(self, key: str) -> Path:
         """Get cache file path for a key"""
@@ -735,8 +846,11 @@ class CacheManager:
     
     def clear(self):
         """Clear all cache files"""
-        for cache_file in self.cache_dir.glob("*.json"):
-            cache_file.unlink()
+        try:
+            for cache_file in self.cache_dir.glob("*.json"):
+                cache_file.unlink()
+        except:
+            pass
 
 # ============================================================================
 # MAIN FACADE
@@ -754,8 +868,11 @@ class SAMDataSystem:
         self.csv_reader = CSVReader(self.config)
         self.cache_manager = CacheManager(self.config)
         
-        # Initialize database
-        self.db_manager.initialize_database()
+        # Initialize database only if it exists
+        if self.config.db_path.exists() and self.config.db_path.stat().st_size > 1000:
+            self.db_manager.initialize_database()
+        else:
+            logger.warning(f"Database not available at {self.config.db_path}")
     
     def get_current_csv_url(self) -> str:
         """Determine which CSV URL to use"""
