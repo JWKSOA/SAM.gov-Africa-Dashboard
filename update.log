@@ -58,3 +58,6 @@ Found 180 rows that reference African countries.
 Inserted 0 new rows into DB.
 Saved a copy locally at /Users/jackkozmetsky/sam_africa_data/ContractOpportunitiesFullCSV_09_29_2025.csv (NOT committed to git).
 Done.
+Downloading CSV from: https://sam.gov/api/prod/fileextractservices/v1/api/download/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public
+Saved CSV to temp: /var/folders/g7/rl56lbj978vbkl1z20xw80_c0000gn/T/tmpzxgipel7/ContractOpportunitiesFullCSV.csv
+Reading CSV in chunks with encoding=utf-8, errors=replace ...

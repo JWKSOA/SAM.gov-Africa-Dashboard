@@ -1,18 +1,8 @@
-# Core dependencies with pinned versions for stability
+numpy==2.1.3
+pandas==2.2.3
 streamlit==1.38.0
-pandas==2.1.4
-numpy==1.26.2
 plotly==5.18.0
 requests==2.31.0
-
-# Streamlit components (optional, for enhanced dashboard)
-streamlit-aggrid==0.3.5
-streamlit-js-eval==0.1.7
-
-# Development and testing (optional)
-pytest==7.4.3
-black==23.12.0
-pylint==3.0.3
-
-# Note: sqlite3 is part of Python standard library
-# Note: pycountry removed as it wasn't being used
+psutil>=5.9.0
+streamlit-aggrid>=0.3.5
+streamlit-js-eval>=0.1.7

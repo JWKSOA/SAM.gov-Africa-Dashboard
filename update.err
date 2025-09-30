@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/Users/jackkozmetsky/Desktop/sam-africa-dashboard/download_and_update.py", line 397, in <module>
+    main()
+    ~~~~^^
+  File "/Users/jackkozmetsky/Desktop/sam-africa-dashboard/download_and_update.py", line 374, in main
+    inserted = insert_new_rows_chunk(cur, matched)
+  File "/Users/jackkozmetsky/Desktop/sam-africa-dashboard/download_and_update.py", line 255, in insert_new_rows_chunk
+    cur.execute(sql, vals)
+    ~~~~~~~~~~~^^^^^^^^^^^
+sqlite3.OperationalError: table opportunities has no column named Sub-Tier

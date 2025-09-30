@@ -232,7 +232,7 @@ def main():
         st.header("📊 Dashboard Controls")
         
         # Data refresh
-        if st.button("🔄 Trigger Data Update", use_container_width=True):
+        if st.button("🔄 Trigger Data Update", use_container_width="stretch"):
             # Clear caches
             st.cache_data.clear()
             
@@ -380,7 +380,7 @@ def main():
         
         if not filtered_df.empty:
             map_fig = create_map_visualization(filtered_df)
-            st.plotly_chart(map_fig, use_container_width=True)
+            st.plotly_chart(map_fig, use_container_width="stretch")
             
             # Top countries table
             st.subheader("Top Countries by Opportunity Count")
@@ -394,7 +394,7 @@ def main():
                         columns={'index': 'Country', 'PopCountry': 'Opportunities'}
                     ),
                     hide_index=True,
-                    use_container_width=True
+                    use_container_width="stretch"
                 )
             
             with col2:
@@ -405,7 +405,7 @@ def main():
                 )
                 fig.update_traces(textposition='inside', textinfo='percent+label')
                 fig.update_layout(showlegend=False, height=300)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width="stretch")
         else:
             st.info("No data available for selected filters")
     
@@ -415,7 +415,7 @@ def main():
         if not filtered_df.empty and 'PostedDate_parsed' in filtered_df.columns:
             # Timeline chart
             timeline_fig = create_timeline_chart(filtered_df)
-            st.plotly_chart(timeline_fig, use_container_width=True)
+            st.plotly_chart(timeline_fig, use_container_width="stretch")
             
             # Monthly summary
             st.subheader("Monthly Summary")
@@ -433,7 +433,7 @@ def main():
             st.dataframe(
                 monthly_summary.sort_values('Month', ascending=False).head(12),
                 hide_index=True,
-                use_container_width=True
+                use_container_width="stretch"
             )
         else:
             st.info("No temporal data available")
@@ -444,7 +444,7 @@ def main():
         if not filtered_df.empty:
             # Agency chart
             agency_fig = create_agency_chart(filtered_df)
-            st.plotly_chart(agency_fig, use_container_width=True)
+            st.plotly_chart(agency_fig, use_container_width="stretch")
             
             # Agency statistics table
             st.subheader("Agency Statistics")
@@ -460,7 +460,7 @@ def main():
             st.dataframe(
                 agency_stats,
                 hide_index=True,
-                use_container_width=True
+                use_container_width="stretch"
             )
         else:
             st.info("No agency data available")
