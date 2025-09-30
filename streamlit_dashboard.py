@@ -2,6 +2,7 @@
 """
 streamlit_dashboard.py - Optimized SAM.gov Africa Dashboard
 High-performance dashboard with caching and efficient queries
+Modified to use tabs for different time periods
 """
 
 import os
@@ -21,7 +22,7 @@ import streamlit as st
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import utilities - will be created if not exists
+# Import utilities
 try:
     from sam_utils import get_system, CountryManager, logger
 except ImportError:
@@ -50,10 +51,9 @@ def load_summary_stats() -> Dict[str, Any]:
     return system.db_manager.get_statistics()
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_recent_data(days: int = 30, limit: int = 10000) -> pd.DataFrame:
-    """Load recent data with efficient query"""
+def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.DataFrame:
+    """Load data for specific time period"""
     system = init_system()
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     
     query = """
         SELECT 
@@ -61,17 +61,30 @@ def load_recent_data(days: int = 30, limit: int = 10000) -> pd.DataFrame:
             PopCountry, CountryCode, PostedDate, Type,
             AwardNumber, AwardDate, "Award$" as AwardAmount,
             Awardee, Link, Description,
-            PrimaryContactEmail, PrimaryContactPhone
+            PrimaryContactTitle, PrimaryContactFullName,
+            PrimaryContactEmail, PrimaryContactPhone,
+            OrganizationType, "Sub-Tier" as SubTier, Office
         FROM opportunities
-        WHERE date(PostedDate) >= date(?)
+        {where_clause}
         ORDER BY PostedDate DESC
         LIMIT ?
     """
     
-    with system.db_manager.get_connection() as conn:
-        df = pd.read_sql_query(query, conn, params=(cutoff, limit))
+    if days is not None:
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        where_clause = "WHERE date(PostedDate) >= date(?)"
+        params = (cutoff, limit)
+    else:
+        # Archive - all data
+        where_clause = ""
+        params = (limit,)
     
-    # Parse dates - FIXED: Removed deprecated parameter
+    query = query.format(where_clause=where_clause)
+    
+    with system.db_manager.get_connection() as conn:
+        df = pd.read_sql_query(query, conn, params=params)
+    
+    # Parse dates
     if not df.empty and 'PostedDate' in df.columns:
         df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
     
@@ -98,37 +111,13 @@ def load_historical_summary() -> pd.DataFrame:
     
     return df
 
-@st.cache_data(ttl=3600)
-def load_agency_summary() -> pd.DataFrame:
-    """Load agency summary statistics"""
-    system = init_system()
-    
-    query = """
-        SELECT 
-            "Department/Ind.Agency" as Agency,
-            COUNT(*) as Total,
-            COUNT(DISTINCT PopCountry) as Countries,
-            MAX(PostedDate) as LastPost
-        FROM opportunities
-        WHERE "Department/Ind.Agency" IS NOT NULL
-        GROUP BY "Department/Ind.Agency"
-        ORDER BY Total DESC
-        LIMIT 20
-    """
-    
-    with system.db_manager.get_connection() as conn:
-        df = pd.read_sql_query(query, conn)
-    
-    return df
-
 # Visualization functions
-def create_map_visualization(df: pd.DataFrame) -> go.Figure:
+def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Figure:
     """Create interactive map of opportunities"""
     if df.empty:
         return go.Figure()
     
     # Extract ISO codes and aggregate
-    country_manager = CountryManager()
     df['iso3'] = df['PopCountry'].apply(
         lambda x: x.split('(')[-1].rstrip(')') if '(' in str(x) else None
     )
@@ -144,7 +133,7 @@ def create_map_visualization(df: pd.DataFrame) -> go.Figure:
         color='Opportunities',
         hover_name='iso3',
         color_continuous_scale='Viridis',
-        title='Contract Opportunities by Country',
+        title=f'Contract Opportunities by Country {title_suffix}',
         labels={'Opportunities': 'Number of Opportunities'}
     )
     
@@ -165,7 +154,7 @@ def create_map_visualization(df: pd.DataFrame) -> go.Figure:
     
     return fig
 
-def create_timeline_chart(df: pd.DataFrame) -> go.Figure:
+def create_timeline_chart(df: pd.DataFrame, title: str = "Daily Contract Postings") -> go.Figure:
     """Create timeline chart of opportunities"""
     if df.empty or 'PostedDate_parsed' not in df.columns:
         return go.Figure()
@@ -178,7 +167,7 @@ def create_timeline_chart(df: pd.DataFrame) -> go.Figure:
         timeline,
         x='Date',
         y='Count',
-        title='Daily Contract Postings',
+        title=title,
         labels={'Count': 'Number of Contracts', 'Date': 'Posted Date'}
     )
     
@@ -216,151 +205,36 @@ def create_agency_chart(df: pd.DataFrame) -> go.Figure:
     
     return fig
 
-# Main dashboard
-def main():
-    """Main dashboard application"""
+def display_period_content(df: pd.DataFrame, period_name: str, period_description: str):
+    """Display content for a specific time period"""
     
-    # Initialize
-    system = init_system()
-    
-    # Header
-    st.title("🌍 SAM.gov Africa Contract Opportunities Dashboard")
-    st.markdown("*Real-time tracking of U.S. government contracting opportunities in African countries*")
-    
-    # Sidebar
+    # Filter controls in sidebar
     with st.sidebar:
-        st.header("📊 Dashboard Controls")
-        
-        # Data refresh - FIXED: Replaced deprecated parameter
-        if st.button("🔄 Trigger Data Update", use_container_width=True):
-            # Clear caches
-            st.cache_data.clear()
-            
-            # Trigger GitHub Action if configured
-            github_token = st.secrets.get("github_token", "")
-            if github_token:
-                import requests
-                owner = st.secrets.get("github_owner", "JWKSOA")
-                repo = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
-                workflow = st.secrets.get("github_workflow", "update-sam-db.yml")
-                
-                url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
-                headers = {
-                    "Authorization": f"Bearer {github_token}",
-                    "Accept": "application/vnd.github+json"
-                }
-                
-                try:
-                    response = requests.post(
-                        url, 
-                        headers=headers, 
-                        json={"ref": "main"}, 
-                        timeout=10
-                    )
-                    if response.status_code in (201, 204):
-                        st.success("✅ Update triggered! Check GitHub Actions.")
-                    else:
-                        st.error(f"❌ Failed: {response.status_code}")
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
-            else:
-                st.info("ℹ️ Configure github_token in secrets to enable updates")
-        
-        st.divider()
-        
-        # Filters
-        st.subheader("🔍 Filters")
-        
-        date_range = st.select_slider(
-            "Date Range",
-            options=[7, 30, 90, 180, 365],
-            value=30,
-            format_func=lambda x: f"Last {x} days"
-        )
-        
-        # Load data based on selection
-        df = load_recent_data(days=date_range)
+        st.subheader(f"🔍 {period_name} Filters")
         
         if not df.empty:
             # Country filter
             countries = sorted(df['PopCountry'].dropna().unique())
             selected_country = st.selectbox(
-                "Country",
+                f"Country ({period_name})",
                 ["All Countries"] + list(countries),
-                index=0
+                index=0,
+                key=f"country_{period_name}"
             )
             
             # Agency filter
             agencies = sorted(df['Department'].dropna().unique())
             selected_agency = st.selectbox(
-                "Agency",
-                ["All Agencies"] + list(agencies)[:50],  # Limit to top 50
-                index=0
+                f"Agency ({period_name})",
+                ["All Agencies"] + list(agencies)[:50],
+                index=0,
+                key=f"agency_{period_name}"
             )
         else:
             selected_country = "All Countries"
             selected_agency = "All Agencies"
-        
-        # Info section
-        st.divider()
-        st.subheader("ℹ️ About")
-        st.markdown("""
-        This dashboard tracks U.S. government contract opportunities
-        posted on SAM.gov that involve African countries.
-        
-        **Data Sources:**
-        - Current: SAM.gov daily extract
-        - Historical: FY1998-present archives
-        
-        **Updates:**
-        - Automated daily at 04:30 UTC
-        - Manual refresh available
-        
-        **Coverage:**
-        - All 54 African countries
-        - Federal contracts & grants
-        - Award notifications
-        """)
     
-    # Main content area
-    
-    # Load statistics
-    stats = load_summary_stats()
-    
-    # Metrics row
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            "Total Opportunities",
-            f"{stats['total_records']:,}",
-            delta=None
-        )
-    
-    with col2:
-        st.metric(
-            "Recent (30 days)",
-            f"{stats['recent_records']:,}",
-            delta=None
-        )
-    
-    with col3:
-        unique_countries = len([c for c in stats['by_country'] if stats['by_country'][c] > 0])
-        st.metric(
-            "Active Countries",
-            f"{unique_countries}/54",
-            delta=None
-        )
-    
-    with col4:
-        db_size = stats['size_mb']
-        st.metric(
-            "Database Size",
-            f"{db_size:.1f} MB",
-            delta=None
-        )
-    
-    # Apply filters to dataframe
+    # Apply filters
     filtered_df = df.copy()
     
     if selected_country != "All Countries":
@@ -369,17 +243,38 @@ def main():
     if selected_agency != "All Agencies":
         filtered_df = filtered_df[filtered_df['Department'] == selected_agency]
     
-    # Visualizations
-    st.divider()
+    # Display metrics
+    col1, col2, col3, col4 = st.columns(4)
     
-    # Tabs for different views
+    with col1:
+        st.metric("Total Opportunities", f"{len(filtered_df):,}")
+    
+    with col2:
+        unique_countries = filtered_df['PopCountry'].nunique()
+        st.metric("Countries", f"{unique_countries}")
+    
+    with col3:
+        unique_agencies = filtered_df['Department'].nunique()
+        st.metric("Agencies", f"{unique_agencies}")
+    
+    with col4:
+        if not filtered_df.empty and 'PostedDate_parsed' in filtered_df.columns:
+            latest_date = filtered_df['PostedDate_parsed'].max()
+            if pd.notna(latest_date):
+                st.metric("Latest Post", latest_date.strftime("%Y-%m-%d"))
+            else:
+                st.metric("Latest Post", "N/A")
+        else:
+            st.metric("Latest Post", "N/A")
+    
+    # Create sub-tabs for different views
     tab1, tab2, tab3, tab4 = st.tabs(["📍 Map View", "📈 Trends", "🏢 Agencies", "📋 Data Table"])
     
     with tab1:
-        st.subheader("Geographic Distribution")
+        st.subheader(f"Geographic Distribution - {period_description}")
         
         if not filtered_df.empty:
-            map_fig = create_map_visualization(filtered_df)
+            map_fig = create_map_visualization(filtered_df, f"({period_description})")
             st.plotly_chart(map_fig, use_container_width=True)
             
             # Top countries table
@@ -398,23 +293,26 @@ def main():
                 )
             
             with col2:
-                fig = px.pie(
-                    values=country_counts.values,
-                    names=country_counts.index,
-                    title="Distribution by Country"
-                )
-                fig.update_traces(textposition='inside', textinfo='percent+label')
-                fig.update_layout(showlegend=False, height=300)
-                st.plotly_chart(fig, use_container_width=True)
+                if not country_counts.empty:
+                    fig = px.pie(
+                        values=country_counts.values,
+                        names=country_counts.index,
+                        title="Distribution by Country"
+                    )
+                    fig.update_traces(textposition='inside', textinfo='percent+label')
+                    fig.update_layout(showlegend=False, height=300)
+                    st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No data available for selected filters")
+            st.info(f"No data available for {period_description}")
     
     with tab2:
-        st.subheader("Temporal Trends")
+        st.subheader(f"Temporal Trends - {period_description}")
         
         if not filtered_df.empty and 'PostedDate_parsed' in filtered_df.columns:
-            # Timeline chart
-            timeline_fig = create_timeline_chart(filtered_df)
+            timeline_fig = create_timeline_chart(
+                filtered_df, 
+                f"Daily Contract Postings - {period_description}"
+            )
             st.plotly_chart(timeline_fig, use_container_width=True)
             
             # Monthly summary
@@ -436,13 +334,12 @@ def main():
                 use_container_width=True
             )
         else:
-            st.info("No temporal data available")
+            st.info(f"No temporal data available for {period_description}")
     
     with tab3:
-        st.subheader("Agency Analysis")
+        st.subheader(f"Agency Analysis - {period_description}")
         
         if not filtered_df.empty:
-            # Agency chart
             agency_fig = create_agency_chart(filtered_df)
             st.plotly_chart(agency_fig, use_container_width=True)
             
@@ -463,10 +360,10 @@ def main():
                 use_container_width=True
             )
         else:
-            st.info("No agency data available")
+            st.info(f"No agency data available for {period_description}")
     
     with tab4:
-        st.subheader("Detailed Contract Data")
+        st.subheader(f"Detailed Contract Data - {period_description}")
         
         if not filtered_df.empty:
             # Display controls
@@ -475,14 +372,16 @@ def main():
             with col1:
                 search_term = st.text_input(
                     "Search in titles and descriptions",
-                    placeholder="Enter keywords..."
+                    placeholder="Enter keywords...",
+                    key=f"search_{period_name}"
                 )
             
             with col2:
                 show_count = st.selectbox(
                     "Show rows",
                     [25, 50, 100, 200],
-                    index=1
+                    index=1,
+                    key=f"show_{period_name}"
                 )
             
             # Apply search filter
@@ -523,16 +422,135 @@ def main():
             )
             
             # Download button
-            csv = display_df.to_csv(index=False)
+            csv = filtered_df.to_csv(index=False)
             st.download_button(
                 label="📥 Download as CSV",
                 data=csv,
-                file_name=f"sam_africa_contracts_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
+                file_name=f"sam_africa_{period_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key=f"download_{period_name}"
             )
-            
         else:
-            st.info("No data available for selected filters")
+            st.info(f"No data available for {period_description}")
+
+# Main dashboard
+def main():
+    """Main dashboard application"""
+    
+    # Initialize
+    system = init_system()
+    
+    # Header
+    st.title("🌍 SAM.gov Africa Contract Opportunities Dashboard")
+    st.markdown("*Real-time tracking of U.S. government contracting opportunities in African countries*")
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("📊 Dashboard Controls")
+        
+        # Data refresh button
+        if st.button("🔄 Trigger Data Update", use_container_width=True):
+            # Clear caches
+            st.cache_data.clear()
+            
+            # Trigger GitHub Action if configured
+            github_token = st.secrets.get("github_token", "")
+            if github_token:
+                import requests
+                owner = st.secrets.get("github_owner", "JWKSOA")
+                repo = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
+                workflow = st.secrets.get("github_workflow", "update-sam-db.yml")
+                
+                url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
+                headers = {
+                    "Authorization": f"Bearer {github_token}",
+                    "Accept": "application/vnd.github+json"
+                }
+                
+                try:
+                    response = requests.post(
+                        url, 
+                        headers=headers, 
+                        json={"ref": "main"}, 
+                        timeout=10
+                    )
+                    if response.status_code in (201, 204):
+                        st.success("✅ Update triggered! Check GitHub Actions.")
+                    else:
+                        st.error(f"❌ Failed: {response.status_code}")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+            else:
+                st.info("ℹ️ Configure github_token in secrets to enable updates")
+        
+        st.divider()
+        
+        # Load overall statistics
+        stats = load_summary_stats()
+        
+        st.subheader("📊 Overall Statistics")
+        st.metric("Total Records", f"{stats['total_records']:,}")
+        st.metric("Database Size", f"{stats['size_mb']:.1f} MB")
+        
+        unique_countries = len([c for c in stats['by_country'] if stats['by_country'][c] > 0])
+        st.metric("Active Countries", f"{unique_countries}/54")
+        
+        # Info section
+        st.divider()
+        st.subheader("ℹ️ About")
+        st.markdown("""
+        This dashboard tracks U.S. government contract opportunities
+        posted on SAM.gov that involve African countries.
+        
+        **Data Sources:**
+        - Current: SAM.gov daily extract
+        - Historical: FY1998-present archives
+        
+        **Updates:**
+        - Automated daily at 04:30 UTC
+        - Manual refresh available
+        """)
+    
+    # Main content area - Time Period Tabs
+    st.divider()
+    
+    # Create main tabs for different time periods
+    tab_7days, tab_30days, tab_1year, tab_5years, tab_archive = st.tabs([
+        "📅 Last 7 Days",
+        "📅 Last 30 Days", 
+        "📅 Last Year",
+        "📅 Last 5 Years",
+        "🗃️ Archive (All Time)"
+    ])
+    
+    with tab_7days:
+        df_7days = load_data_by_period(days=7)
+        display_period_content(df_7days, "Last 7 Days", "Past Week")
+    
+    with tab_30days:
+        df_30days = load_data_by_period(days=30)
+        display_period_content(df_30days, "Last 30 Days", "Past Month")
+    
+    with tab_1year:
+        df_1year = load_data_by_period(days=365)
+        display_period_content(df_1year, "Last Year", "Past Year")
+    
+    with tab_5years:
+        df_5years = load_data_by_period(days=1825)  # 365 * 5
+        display_period_content(df_5years, "Last 5 Years", "Past 5 Years")
+    
+    with tab_archive:
+        df_archive = load_data_by_period(days=None)  # All data
+        
+        # Display archive summary first
+        st.info(f"""
+        📚 **Archive Contains All Historical Data**
+        - Total Records: {len(df_archive):,}
+        - Date Range: {df_archive['PostedDate'].min() if not df_archive.empty else 'N/A'} to {df_archive['PostedDate'].max() if not df_archive.empty else 'N/A'}
+        - This includes all data from FY1998 to present
+        """)
+        
+        display_period_content(df_archive, "Archive", "All Time")
     
     # Footer
     st.divider()
@@ -543,7 +561,6 @@ def main():
         with col1:
             st.markdown(f"""
             **Database Location:** `{system.config.db_path}`  
-            **Last Update:** {stats.get('last_update', 'Unknown')}  
             **Total Records:** {stats['total_records']:,}  
             **Database Size:** {stats['size_mb']:.1f} MB
             """)
