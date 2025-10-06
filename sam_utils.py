@@ -68,8 +68,7 @@ class Config:
         "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/Archived%20Data/"
     )
     
-    # EXACT column names from SAM.gov documentation (Table 1: Opportunities Data Parameters)
-    # These match EXACTLY what's in the CSV files
+    # EXACT column names from SAM.gov documentation
     sam_columns: Dict[str, str] = field(default_factory=lambda: {
         "NoticeId": "The ID of the notice",
         "Title": "The title of the opportunity",
@@ -126,14 +125,13 @@ class Config:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
-# AFRICAN COUNTRIES DATA - ALL 54 COUNTRIES WITH ISO3 CODES
+# AFRICAN COUNTRIES DATA - Using CountryManager as the main class name
 # ============================================================================
 
-class AfricanCountryManager:
+class CountryManager:
     """Manages identification of all 54 African countries using AFRINIC region codes"""
     
     # All 54 African countries with their ISO3 codes from AFRINIC
-    # Source: https://www.nro.net/list-of-country-codes-in-the-afrinic-region/
     AFRICAN_COUNTRIES = {
         # North Africa
         "ALGERIA": "DZA",
@@ -344,6 +342,9 @@ class AfricanCountryManager:
         terms.extend([k for k, v in self.ALTERNATIVE_NAMES.items() if v])
         
         return terms
+
+# Create an alias for backward compatibility
+AfricanCountryManager = CountryManager
 
 # ============================================================================
 # DATABASE MANAGEMENT WITH PROPER DEDUPLICATION
@@ -678,7 +679,7 @@ class DatabaseManager:
 class DataProcessor:
     """Process SAM.gov data with African country filtering"""
     
-    def __init__(self, config: Config, country_manager: AfricanCountryManager):
+    def __init__(self, config: Config, country_manager: CountryManager):
         self.config = config
         self.country_manager = country_manager
         
@@ -836,14 +837,16 @@ class SAMDataSystem:
     
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
-        self.country_manager = AfricanCountryManager()
+        self.country_manager = CountryManager()  # Using CountryManager
         self.db_manager = DatabaseManager(self.config)
         self.data_processor = DataProcessor(self.config, self.country_manager)
         self.http_client = HTTPClient(self.config)
         self.csv_reader = CSVReader(self.config)
         
-        # Initialize database
-        self.db_manager.initialize_database()
+        # Initialize database if it doesn't exist
+        if not self.config.db_path.exists():
+            logger.info("Database doesn't exist, initializing...")
+            self.db_manager.initialize_database()
         
     def get_archive_years(self) -> List[int]:
         """Get list of all archive years to process"""
