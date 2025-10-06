@@ -1,0 +1,254 @@
+{
+  "FY2000": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:54:26.431802",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2001": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:54:26.885164",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2002": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:54:41.140899",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2003": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:55:02.214425",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2004": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:55:23.559333",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2005": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:55:46.099698",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2006": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:56:11.254318",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2007": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:56:40.069935",
+    "records": {
+      "inserted": 0,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2008": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:57:15.704275",
+    "records": {
+      "inserted": 475,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2009": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:58:00.176880",
+    "records": {
+      "inserted": 1314,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2010": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:58:50.962161",
+    "records": {
+      "inserted": 2099,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2011": {
+    "status": "completed",
+    "timestamp": "2025-10-06T12:59:40.746794",
+    "records": {
+      "inserted": 3023,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2012": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:00:35.598561",
+    "records": {
+      "inserted": 3884,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2013": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:01:30.261930",
+    "records": {
+      "inserted": 4780,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2014": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:02:30.628370",
+    "records": {
+      "inserted": 5914,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2015": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:03:29.497603",
+    "records": {
+      "inserted": 7194,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2016": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:04:26.613542",
+    "records": {
+      "inserted": 8805,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2017": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:05:31.360814",
+    "records": {
+      "inserted": 10254,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2018": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:06:42.278534",
+    "records": {
+      "inserted": 11728,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2019": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:07:45.641655",
+    "records": {
+      "inserted": 13140,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2020": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:08:56.475247",
+    "records": {
+      "inserted": 14952,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2021": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:10:09.516153",
+    "records": {
+      "inserted": 16590,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2022": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:11:25.290146",
+    "records": {
+      "inserted": 18433,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2023": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:12:48.232590",
+    "records": {
+      "inserted": 20613,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2024": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:14:03.900981",
+    "records": {
+      "inserted": 22955,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2025": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:15:10.349217",
+    "records": {
+      "inserted": 24974,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "FY2026": {
+    "status": "error",
+    "timestamp": "2025-10-06T13:15:10.477332",
+    "records": {
+      "inserted": 24974,
+      "updated": 0,
+      "skipped": 0
+    }
+  },
+  "CURRENT": {
+    "status": "completed",
+    "timestamp": "2025-10-06T13:15:23.364731",
+    "records": {
+      "inserted": 25304,
+      "updated": 0,
+      "skipped": 0
+    }
+  }
+}

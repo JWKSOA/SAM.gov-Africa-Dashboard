@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-sam_utils.py - Complete SAM.gov data handler with exact column names and African country detection
+sam_utils.py - Complete SAM.gov data handler with ALL SQL syntax errors fixed
 Handles all 54 African countries with proper ISO3 codes from AFRINIC region
+Fixed: Proper quoting for all column names with special characters
 """
 
 import os
@@ -347,7 +348,7 @@ class CountryManager:
 AfricanCountryManager = CountryManager
 
 # ============================================================================
-# DATABASE MANAGEMENT WITH PROPER DEDUPLICATION
+# DATABASE MANAGEMENT WITH PROPER DEDUPLICATION AND FIXED SQL QUOTING
 # ============================================================================
 
 class DatabaseManager:
@@ -377,6 +378,23 @@ class DatabaseManager:
         finally:
             if conn:
                 conn.close()
+    
+    def needs_quoting(self, column_name: str) -> bool:
+        """
+        Check if a column name needs quoting in SQL
+        Returns True if the column contains any special characters
+        """
+        # Check for any special characters that require quoting
+        special_chars = ['/', '#', '$', '-', ' ', '.', '(', ')', '[', ']', '*', '&', '%', '@', '!']
+        return any(char in column_name for char in special_chars)
+    
+    def quote_column(self, column_name: str) -> str:
+        """
+        Properly quote a column name for SQL if needed
+        """
+        if self.needs_quoting(column_name):
+            return f'"{column_name}"'
+        return column_name
     
     def initialize_database(self):
         """Create database with exact SAM.gov schema"""
@@ -452,7 +470,7 @@ class DatabaseManager:
                 "CREATE INDEX idx_pop_country ON opportunities(PopCountry)",
                 "CREATE INDEX idx_active ON opportunities(Active)",
                 "CREATE INDEX idx_type ON opportunities(Type)",
-                "CREATE INDEX idx_dept ON opportunities(\"Department/Ind.Agency\")",
+                'CREATE INDEX idx_dept ON opportunities("Department/Ind.Agency")',
                 "CREATE INDEX idx_country_date ON opportunities(PopCountry, PostedDate_normalized DESC)"
             ]
             
@@ -530,16 +548,15 @@ class DatabaseManager:
                     
                     # Update if new is more recent
                     if new_norm and existing_norm and new_norm > existing_norm:
-                        # Build UPDATE statement
+                        # Build UPDATE statement with properly quoted columns
                         update_cols = []
                         update_vals = []
                         
                         for col in self.config.sam_columns.keys():
                             if col in row.index and col != 'NoticeId':
-                                if '/' in col or '#' in col or '$' in col:
-                                    update_cols.append(f'"{col}" = ?')
-                                else:
-                                    update_cols.append(f'{col} = ?')
+                                # Use the quote_column method for all columns
+                                quoted_col = self.quote_column(col)
+                                update_cols.append(f'{quoted_col} = ?')
                                 update_vals.append(row[col] if pd.notna(row[col]) else None)
                         
                         # Add normalized date
@@ -558,11 +575,12 @@ class DatabaseManager:
                             updated += 1
                         except Exception as e:
                             logger.error(f"Update error for {notice_id}: {e}")
+                            logger.debug(f"Failed SQL: {sql}")
                             skipped += 1
                     else:
                         skipped += 1
                 else:
-                    # Insert new record
+                    # Insert new record with properly quoted columns
                     columns = ['NoticeId']
                     values = [notice_id]
                     
@@ -572,13 +590,12 @@ class DatabaseManager:
                     columns.append('PostedDate_normalized')
                     values.append(normalized_date)
                     
-                    # Add all other columns
+                    # Add all other columns with proper quoting
                     for col in self.config.sam_columns.keys():
                         if col != 'NoticeId' and col in row.index:
-                            if '/' in col or '#' in col or '$' in col:
-                                columns.append(f'"{col}"')
-                            else:
-                                columns.append(col)
+                            # Use the quote_column method for proper quoting
+                            quoted_col = self.quote_column(col)
+                            columns.append(quoted_col)
                             values.append(row[col] if pd.notna(row[col]) else None)
                     
                     # Build and execute INSERT
@@ -595,6 +612,8 @@ class DatabaseManager:
                             skipped += 1
                     except Exception as e:
                         logger.error(f"Insert error for {notice_id}: {e}")
+                        logger.debug(f"Failed SQL: {sql}")
+                        logger.debug(f"Column count: {len(columns)}, Value count: {len(values)}")
                         skipped += 1
             
             conn.commit()
