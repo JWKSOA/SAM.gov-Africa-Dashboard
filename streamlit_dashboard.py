@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-streamlit_dashboard.py - Fixed version with proper date filtering
+streamlit_dashboard.py - Fixed version with proper column handling and date filtering
+Handles SAM.gov column names correctly and shows accurate date ranges
 """
 
 import os
@@ -46,7 +47,7 @@ def init_system():
             columns = {row[1] for row in cur.fetchall()}
             
             if 'PostedDate_normalized' not in columns:
-                st.warning("Database needs updating. Please run: python download_and_update.py")
+                st.warning("Database needs updating. Please run: python fix_database.py")
         
         return system
     except Exception as e:
@@ -63,7 +64,7 @@ def get_period_counts() -> dict:
                    'last_5_years': 0, 'all_time': 0}
         
         counts = {}
-        today = datetime.now().date().isoformat()
+        today = datetime.now().date()
         
         with system.db_manager.get_connection() as conn:
             cur = conn.cursor()
@@ -75,31 +76,32 @@ def get_period_counts() -> dict:
             if 'PostedDate_normalized' in columns:
                 # Use normalized dates for accurate counting
                 periods = [
-                    ('last_7_days', 7),
-                    ('last_30_days', 30),
-                    ('last_year', 365),
-                    ('last_5_years', 1825)
+                    ('last_7_days', (today - timedelta(days=7)).isoformat(), today.isoformat()),
+                    ('last_30_days', (today - timedelta(days=30)).isoformat(), today.isoformat()),
+                    ('last_year', (today - timedelta(days=365)).isoformat(), today.isoformat()),
+                    ('last_5_years', (today - timedelta(days=1825)).isoformat(), today.isoformat())
                 ]
                 
-                for period_name, days in periods:
-                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+                for period_name, start_date, end_date in periods:
                     cur.execute("""
                         SELECT COUNT(*) FROM opportunities 
                         WHERE PostedDate_normalized >= ?
                         AND PostedDate_normalized <= ?
-                    """, (cutoff_date, today))
+                    """, (start_date, end_date))
                     counts[period_name] = cur.fetchone()[0]
             else:
-                # Fallback: use original PostedDate with text comparison
-                st.warning("Database needs updating for accurate date filtering")
-                
+                # Fallback: Try to parse dates on the fly
                 for period_name, days in [('last_7_days', 7), ('last_30_days', 30), 
                                          ('last_year', 365), ('last_5_years', 1825)]:
-                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+                    cutoff_date = (today - timedelta(days=days)).strftime('%Y-%m-%d')
+                    # Try different date formats
                     cur.execute("""
                         SELECT COUNT(*) FROM opportunities 
-                        WHERE date(PostedDate) >= date(?)
-                    """, (cutoff_date,))
+                        WHERE (
+                            date(PostedDate) >= date(?) 
+                            OR date(substr(PostedDate, 1, 10)) >= date(?)
+                        )
+                    """, (cutoff_date, cutoff_date))
                     counts[period_name] = cur.fetchone()[0]
             
             # All time count
@@ -115,7 +117,7 @@ def get_period_counts() -> dict:
 
 @st.cache_data(ttl=300)
 def load_data_by_period(days: int = None, limit: int = 100000) -> pd.DataFrame:
-    """Load data for specific time period using normalized dates"""
+    """Load data for specific time period with proper column name mapping"""
     try:
         system = init_system()
         if not system:
@@ -124,76 +126,118 @@ def load_data_by_period(days: int = None, limit: int = 100000) -> pd.DataFrame:
         with system.db_manager.get_connection() as conn:
             cur = conn.cursor()
             
-            # Check if PostedDate_normalized exists
+            # Check available columns
             cur.execute("PRAGMA table_info(opportunities)")
-            columns = {row[1] for row in cur.fetchall()}
-            has_normalized = 'PostedDate_normalized' in columns
+            available_columns = {row[1] for row in cur.fetchall()}
             
-            if has_normalized:
+            # Build column selection with proper aliases
+            # Map database columns to friendly names
+            column_mapping = []
+            
+            # Essential columns
+            column_mapping.append('NoticeID')
+            column_mapping.append('Title')
+            
+            # Handle Department column (might be stored as "Department/Ind.Agency")
+            if '"Department/Ind.Agency"' in available_columns or 'Department/Ind.Agency' in available_columns:
+                column_mapping.append('"Department/Ind.Agency" as Department')
+            elif 'Department' in available_columns:
+                column_mapping.append('Department')
+            else:
+                column_mapping.append('NULL as Department')
+            
+            # Country columns
+            column_mapping.append('PopCountry' if 'PopCountry' in available_columns else 'NULL as PopCountry')
+            column_mapping.append('CountryCode' if 'CountryCode' in available_columns else 'NULL as CountryCode')
+            
+            # Date columns
+            column_mapping.append('PostedDate' if 'PostedDate' in available_columns else 'NULL as PostedDate')
+            if 'PostedDate_normalized' in available_columns:
+                column_mapping.append('PostedDate_normalized')
+            
+            # Other important columns
+            column_mapping.append('Type' if 'Type' in available_columns else 'NULL as Type')
+            column_mapping.append('AwardNumber' if 'AwardNumber' in available_columns else 'NULL as AwardNumber')
+            column_mapping.append('AwardDate' if 'AwardDate' in available_columns else 'NULL as AwardDate')
+            column_mapping.append('"Award$" as AwardAmount' if 'Award$' in available_columns else 'NULL as AwardAmount')
+            column_mapping.append('Awardee' if 'Awardee' in available_columns else 'NULL as Awardee')
+            column_mapping.append('Link' if 'Link' in available_columns else 'NULL as Link')
+            column_mapping.append('Description' if 'Description' in available_columns else 'NULL as Description')
+            
+            # Contact columns
+            if 'PrimaryContactFullName' in available_columns:
+                column_mapping.append('PrimaryContactFullName')
+            if 'PrimaryContactEmail' in available_columns:
+                column_mapping.append('PrimaryContactEmail')
+            if 'PrimaryContactPhone' in available_columns:
+                column_mapping.append('PrimaryContactPhone')
+            
+            # Organization columns
+            if 'OrganizationType' in available_columns:
+                column_mapping.append('OrganizationType')
+            if '"Sub-Tier"' in available_columns or 'Sub-Tier' in available_columns:
+                column_mapping.append('"Sub-Tier" as SubTier')
+            if 'Office' in available_columns:
+                column_mapping.append('Office')
+            
+            columns_str = ', '.join(column_mapping)
+            
+            # Build query based on period
+            if 'PostedDate_normalized' in available_columns:
                 # Use normalized dates for accurate filtering
                 if days is not None:
-                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
-                    today = datetime.now().date().isoformat()
+                    today = datetime.now().date()
+                    start_date = (today - timedelta(days=days)).isoformat()
+                    end_date = today.isoformat()
                     
-                    query = """
-                        SELECT 
-                            NoticeID, Title, "Department/Ind.Agency" as Department,
-                            PopCountry, CountryCode, PostedDate, 
-                            PostedDate_normalized, Type,
-                            AwardNumber, AwardDate, "Award$" as AwardAmount,
-                            Awardee, Link, Description,
-                            PrimaryContactTitle, PrimaryContactFullName,
-                            PrimaryContactEmail, PrimaryContactPhone,
-                            OrganizationType, "Sub-Tier" as SubTier, Office
+                    query = f"""
+                        SELECT {columns_str}
                         FROM opportunities
                         WHERE PostedDate_normalized >= ?
                         AND PostedDate_normalized <= ?
                         ORDER BY PostedDate_normalized DESC
                         LIMIT ?
                     """
-                    df = pd.read_sql_query(query, conn, params=(cutoff_date, today, limit))
+                    df = pd.read_sql_query(query, conn, params=(start_date, end_date, limit))
                 else:
                     # All data
-                    query = """
-                        SELECT 
-                            NoticeID, Title, "Department/Ind.Agency" as Department,
-                            PopCountry, CountryCode, PostedDate,
-                            PostedDate_normalized, Type,
-                            AwardNumber, AwardDate, "Award$" as AwardAmount,
-                            Awardee, Link, Description,
-                            PrimaryContactTitle, PrimaryContactFullName,
-                            PrimaryContactEmail, PrimaryContactPhone,
-                            OrganizationType, "Sub-Tier" as SubTier, Office
+                    query = f"""
+                        SELECT {columns_str}
                         FROM opportunities
                         ORDER BY PostedDate_normalized DESC
                         LIMIT ?
                     """
                     df = pd.read_sql_query(query, conn, params=(limit,))
-                
-                # Parse normalized dates
-                if not df.empty and 'PostedDate_normalized' in df.columns:
-                    df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate_normalized'], errors='coerce')
-                
             else:
-                # Fallback: use original PostedDate
-                st.warning("Please run 'python download_and_update.py' to enable proper date filtering")
-                
+                # Fallback without normalized dates
                 if days is not None:
-                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
-                    query = """
-                        SELECT * FROM opportunities
-                        WHERE date(PostedDate) >= date(?)
+                    cutoff_date = (datetime.now().date() - timedelta(days=days)).strftime('%Y-%m-%d')
+                    query = f"""
+                        SELECT {columns_str}
+                        FROM opportunities
+                        WHERE date(substr(PostedDate, 1, 10)) >= date(?)
                         ORDER BY PostedDate DESC
                         LIMIT ?
                     """
                     df = pd.read_sql_query(query, conn, params=(cutoff_date, limit))
                 else:
-                    query = "SELECT * FROM opportunities ORDER BY PostedDate DESC LIMIT ?"
+                    query = f"""
+                        SELECT {columns_str}
+                        FROM opportunities
+                        ORDER BY PostedDate DESC
+                        LIMIT ?
+                    """
                     df = pd.read_sql_query(query, conn, params=(limit,))
-                
-                # Try to parse dates
-                if not df.empty and 'PostedDate' in df.columns:
-                    df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
+            
+            # Parse dates for visualization
+            if not df.empty:
+                if 'PostedDate_normalized' in df.columns:
+                    df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate_normalized'], errors='coerce')
+                elif 'PostedDate' in df.columns:
+                    # Try multiple date formats
+                    df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce', utc=True)
+                    # Convert to local timezone and remove timezone info for display
+                    df['PostedDate_parsed'] = df['PostedDate_parsed'].dt.tz_localize(None)
             
             return df
             
@@ -204,16 +248,19 @@ def load_data_by_period(days: int = None, limit: int = 100000) -> pd.DataFrame:
 # Visualization functions
 def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Figure:
     """Create interactive map of opportunities"""
-    if df.empty:
+    if df.empty or 'PopCountry' not in df.columns:
         return go.Figure()
     
     # Extract ISO codes
     df['iso3'] = df['PopCountry'].apply(
-        lambda x: x.split('(')[-1].rstrip(')') if '(' in str(x) else None
+        lambda x: x.split('(')[-1].rstrip(')') if pd.notna(x) and '(' in str(x) else None
     )
     
     summary = df.groupby('iso3').size().reset_index(name='Opportunities')
     summary = summary[summary['iso3'].notna()]
+    
+    if summary.empty:
+        return go.Figure()
     
     fig = px.choropleth(
         summary,
@@ -265,9 +312,15 @@ def display_period_content(df: pd.DataFrame, period_name: str):
     with col1:
         st.metric("Total Opportunities", f"{len(df):,}")
     with col2:
-        st.metric("Countries", f"{df['PopCountry'].nunique()}")
+        if 'PopCountry' in df.columns:
+            st.metric("Countries", f"{df['PopCountry'].nunique()}")
+        else:
+            st.metric("Countries", "N/A")
     with col3:
-        st.metric("Agencies", f"{df['Department'].nunique()}")
+        if 'Department' in df.columns:
+            st.metric("Agencies", f"{df['Department'].nunique()}")
+        else:
+            st.metric("Agencies", "N/A")
     with col4:
         if 'PostedDate_parsed' in df.columns and df['PostedDate_parsed'].notna().any():
             latest = df['PostedDate_parsed'].max()
@@ -275,11 +328,18 @@ def display_period_content(df: pd.DataFrame, period_name: str):
         else:
             st.metric("Latest Post", "N/A")
     
+    # Show actual date range
+    if 'PostedDate_parsed' in df.columns and df['PostedDate_parsed'].notna().any():
+        min_date = df['PostedDate_parsed'].min()
+        max_date = df['PostedDate_parsed'].max()
+        if pd.notna(min_date) and pd.notna(max_date):
+            st.info(f"📅 Showing data from {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
+    
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📍 Map View", "📈 Trends", "📋 Data Table"])
     
     with tab1:
-        if not df.empty:
+        if not df.empty and 'PopCountry' in df.columns:
             map_fig = create_map_visualization(df, f"({period_name})")
             st.plotly_chart(map_fig, use_container_width=True)
             
@@ -306,11 +366,24 @@ def display_period_content(df: pd.DataFrame, period_name: str):
             st.plotly_chart(timeline_fig, use_container_width=True)
     
     with tab3:
-        # Display table
-        display_cols = ['PostedDate', 'Title', 'Department', 'PopCountry', 'Type']
-        display_df = df[display_cols].head(100) if not df.empty else pd.DataFrame()
+        # Prepare display columns - only include columns that exist
+        available_display_cols = []
+        for col in ['PostedDate', 'Title', 'Department', 'PopCountry', 'Type', 'Link']:
+            if col in df.columns:
+                available_display_cols.append(col)
         
-        if not display_df.empty:
+        if available_display_cols:
+            display_df = df[available_display_cols].head(100)
+            
+            # Clean up any NaN values for display
+            display_df = display_df.fillna('')
+            
+            # Format links if present
+            if 'Link' in display_df.columns:
+                display_df['Link'] = display_df['Link'].apply(
+                    lambda x: f'[View]({x})' if x and x.startswith('http') else x
+                )
+            
             st.dataframe(display_df, hide_index=True, use_container_width=True)
             
             # Download button
@@ -321,6 +394,8 @@ def display_period_content(df: pd.DataFrame, period_name: str):
                 f"sam_africa_{period_name.lower().replace(' ', '_')}.csv",
                 "text/csv"
             )
+        else:
+            st.warning("No displayable columns available")
 
 # Main dashboard
 def main():
@@ -329,10 +404,14 @@ def main():
     system = init_system()
     if not system:
         st.error("❌ Failed to initialize system")
+        st.info("Please ensure the database exists and run: python fix_database.py")
         st.stop()
     
     st.title("🌍 SAM.gov Africa Contract Opportunities Dashboard")
     st.markdown("*Tracking U.S. government contracting opportunities in African countries*")
+    
+    # Display current date for reference
+    st.caption(f"📅 Today's Date: {datetime.now().strftime('%B %d, %Y')}")
     
     # Sidebar
     with st.sidebar:
@@ -361,36 +440,30 @@ def main():
         **Coverage:** All 54 African countries
         """)
     
-    # Main tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📅 Last 7 Days",
-        "📅 Last 30 Days",
-        "📅 Last Year",
-        "📅 Last 5 Years",
-        "🗃️ Archive (All Time)"
-    ])
+    # Main tabs with date ranges
+    today = datetime.now().date()
+    tabs_info = [
+        (f"📅 Last 7 Days ({(today - timedelta(days=7)).strftime('%b %d')} - {today.strftime('%b %d')})", 7),
+        (f"📅 Last 30 Days ({(today - timedelta(days=30)).strftime('%b %d')} - {today.strftime('%b %d')})", 30),
+        ("📅 Last Year", 365),
+        ("📅 Last 5 Years", 1825),
+        ("🗃️ Archive (All Time)", None)
+    ]
     
-    with tab1:
-        df = load_data_by_period(days=7)
-        display_period_content(df, "Last 7 Days")
+    tabs = st.tabs([info[0] for info in tabs_info])
     
-    with tab2:
-        df = load_data_by_period(days=30)
-        display_period_content(df, "Last 30 Days")
-    
-    with tab3:
-        df = load_data_by_period(days=365)
-        display_period_content(df, "Last Year")
-    
-    with tab4:
-        df = load_data_by_period(days=1825)
-        display_period_content(df, "Last 5 Years")
-    
-    with tab5:
-        df = load_data_by_period(days=None)
-        if not df.empty:
-            st.info(f"📚 Archive contains {len(df):,} total records from all time")
-        display_period_content(df, "All Time")
+    for tab, (tab_name, days) in zip(tabs, tabs_info):
+        with tab:
+            if days is not None:
+                df = load_data_by_period(days=days)
+                period_name = tab_name.split('(')[0].strip().replace('📅', '').strip()
+            else:
+                df = load_data_by_period(days=None)
+                period_name = "All Time"
+                if not df.empty:
+                    st.info(f"📚 Archive contains {len(df):,} total records from all time")
+            
+            display_period_content(df, period_name)
 
 if __name__ == "__main__":
     main()
