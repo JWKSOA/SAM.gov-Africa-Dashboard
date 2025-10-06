@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-bootstrap_historical.py - Optimized Historical Data Bootstrap
-Fetches all historical years with improved performance and error handling
+bootstrap_historical.py - Complete historical data loader from FY1998 to current
+Processes all SAM.gov archive files and current data with proper deduplication
 """
 
 import os
@@ -9,281 +9,445 @@ import sys
 import logging
 import tempfile
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Optional, List, Tuple
+import json
 
-# Add parent directory to path if running standalone
+import pandas as pd
+
+# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from sam_utils import (
-    get_system, Config, logger,
-    DatabaseManager, DataProcessor, HTTPClient, CSVReader
-)
+from sam_utils import get_system, logger
 
-# Configure logging for this module
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bootstrap.log'),
+        logging.StreamHandler()
+    ]
 )
 
 class HistoricalBootstrap:
-    """Handles historical data bootstrap with resume capability"""
+    """Complete bootstrap of all SAM.gov historical data"""
     
-    def __init__(self, start_year: int = 1998, end_year: Optional[int] = None):
-        """Initialize bootstrap with year range"""
+    def __init__(self):
+        """Initialize bootstrap system"""
         self.system = get_system()
-        self.start_year = start_year
+        self.progress_file = self.system.config.data_dir / "bootstrap_progress.json"
+        self.completed_sources = self._load_progress()
         
-        # Default to current fiscal year
-        if end_year is None:
-            today = datetime.today()
-            self.end_year = today.year if today.month < 10 else today.year + 1
-        else:
-            self.end_year = end_year
+        # Statistics tracking
+        self.total_inserted = 0
+        self.total_updated = 0
+        self.total_skipped = 0
+        self.country_stats = {}
         
-        # Track progress
-        self.progress_file = self.system.config.data_dir / ".bootstrap_progress.txt"
-        self.completed_years = self._load_progress()
-        
-    def _load_progress(self) -> set:
-        """Load previously completed years"""
+    def _load_progress(self) -> dict:
+        """Load progress from file"""
         if self.progress_file.exists():
             try:
                 with open(self.progress_file, 'r') as f:
-                    return set(map(int, f.read().strip().split(',')))
+                    return json.load(f)
             except:
-                pass
-        return set()
+                return {}
+        return {}
     
-    def _save_progress(self, year: int):
-        """Save progress after completing a year"""
-        self.completed_years.add(year)
-        with open(self.progress_file, 'w') as f:
-            f.write(','.join(map(str, sorted(self.completed_years))))
+    def _save_progress(self, source: str, status: str = "completed"):
+        """Save progress after completing a source"""
+        self.completed_sources[source] = {
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "records": {
+                "inserted": self.total_inserted,
+                "updated": self.total_updated,
+                "skipped": self.total_skipped
+            }
+        }
+        
+        try:
+            with open(self.progress_file, 'w') as f:
+                json.dump(self.completed_sources, f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save progress: {e}")
     
-    def process_archive_year(self, year: int) -> tuple[int, int]:
-        """Process a single archive year"""
-        if year in self.completed_years:
-            logger.info(f"Skipping FY{year} (already completed)")
-            return 0, 0
+    def clear_database(self):
+        """Clear and reinitialize database"""
+        logger.warning("Clearing existing database...")
+        
+        if self.system.config.db_path.exists():
+            self.system.config.db_path.unlink()
+            
+        # Reinitialize with proper schema
+        self.system.db_manager.initialize_database()
+        
+        # Clear progress tracking
+        if self.progress_file.exists():
+            self.progress_file.unlink()
+        self.completed_sources = {}
+        
+        logger.info("Database cleared and reinitialized")
+    
+    def process_archive_year(self, year: int) -> Tuple[int, int, int]:
+        """
+        Process a single fiscal year archive
+        Returns: (inserted, updated, skipped)
+        """
+        source_key = f"FY{year}"
+        
+        # Check if already processed
+        if source_key in self.completed_sources:
+            status = self.completed_sources[source_key].get('status')
+            if status == 'completed':
+                logger.info(f"Skipping {source_key} - already completed")
+                return 0, 0, 0
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"Processing FY{year}")
+        logger.info(f"Processing {source_key} Archive")
         logger.info(f"{'='*60}")
         
         # Get archive URL
-        url = self.system.get_archive_url(year)
-        if not url:
-            logger.warning(f"No archive found for FY{year}")
-            return 0, 0
+        archive_url = self.system.get_archive_url(year)
         
-        total_inserted = 0
-        total_duplicates = 0
+        year_inserted = 0
+        year_updated = 0
+        year_skipped = 0
         
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / f"FY{year}.csv"
             
             # Download archive
-            if not self.system.http_client.download_file(url, csv_path):
-                logger.error(f"Failed to download FY{year}")
-                return 0, 0
+            if not self.system.http_client.download_file(archive_url, csv_path):
+                logger.warning(f"Could not download FY{year} archive - may not exist")
+                self._save_progress(source_key, "not_found")
+                return 0, 0, 0
             
-            # Process in chunks
+            # Check file size
+            file_size_mb = csv_path.stat().st_size / (1024 * 1024)
+            logger.info(f"Processing {file_size_mb:.1f} MB file")
+            
+            # Process CSV in chunks
             try:
                 chunk_num = 0
                 for chunk in self.system.csv_reader.read_csv_chunks(csv_path):
                     chunk_num += 1
                     
-                    # Process chunk
-                    processed = self.system.data_processor.process_chunk(chunk)
+                    # Filter for African countries
+                    african_data = self.system.data_processor.process_chunk(chunk)
                     
-                    if processed.empty:
-                        continue
-                    
-                    # Insert to database
-                    inserted, duplicates = self.system.db_manager.insert_batch(
-                        processed, 
-                        self.system.country_manager
-                    )
-                    
-                    total_inserted += inserted
-                    total_duplicates += duplicates
-                    
-                    # Log progress every 10 chunks
-                    if chunk_num % 10 == 0:
-                        logger.info(f"  Chunk {chunk_num}: {total_inserted} inserted, "
-                                  f"{total_duplicates} duplicates")
+                    if not african_data.empty:
+                        # Insert/update with deduplication
+                        inserted, updated, skipped = self.system.db_manager.insert_or_update_batch(
+                            african_data, 
+                            source=source_key
+                        )
+                        
+                        year_inserted += inserted
+                        year_updated += updated
+                        year_skipped += skipped
+                        
+                        # Update country statistics
+                        for country in african_data['PopCountry'].value_counts().index:
+                            if country not in self.country_stats:
+                                self.country_stats[country] = 0
+                            self.country_stats[country] += 1
+                        
+                        # Log progress every 10 chunks
+                        if chunk_num % 10 == 0:
+                            logger.info(f"  Chunk {chunk_num}: {year_inserted} new, "
+                                      f"{year_updated} updated, {year_skipped} skipped")
                 
-                # Mark year as complete
-                self._save_progress(year)
+                # Update totals
+                self.total_inserted += year_inserted
+                self.total_updated += year_updated
+                self.total_skipped += year_skipped
                 
-                logger.info(f"FY{year} complete: {total_inserted} inserted, "
-                          f"{total_duplicates} duplicates")
+                # Save progress
+                self._save_progress(source_key, "completed")
+                
+                logger.info(f"✅ {source_key} complete: {year_inserted} inserted, "
+                          f"{year_updated} updated, {year_skipped} skipped")
                 
             except Exception as e:
-                logger.error(f"Error processing FY{year}: {e}")
+                logger.error(f"Error processing {source_key}: {e}")
+                self._save_progress(source_key, "error")
                 
-        return total_inserted, total_duplicates
+        return year_inserted, year_updated, year_skipped
     
-    def process_current_full(self) -> tuple[int, int]:
-        """Process current full CSV"""
+    def process_current_data(self) -> Tuple[int, int, int]:
+        """
+        Process current opportunities CSV
+        Returns: (inserted, updated, skipped)
+        """
+        source_key = "CURRENT"
+        
         logger.info(f"\n{'='*60}")
-        logger.info("Processing current full CSV")
+        logger.info("Processing Current Opportunities CSV")
         logger.info(f"{'='*60}")
         
-        url = self.system.get_current_csv_url()
-        total_inserted = 0
-        total_duplicates = 0
+        current_url = self.system.get_current_url()
+        
+        current_inserted = 0
+        current_updated = 0
+        current_skipped = 0
         
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "current.csv"
             
             # Download current CSV
-            if not self.system.http_client.download_file(url, csv_path):
+            if not self.system.http_client.download_file(current_url, csv_path):
                 logger.error("Failed to download current CSV")
-                return 0, 0
+                return 0, 0, 0
             
-            # Process in chunks
+            # Check file size
+            file_size_mb = csv_path.stat().st_size / (1024 * 1024)
+            logger.info(f"Processing {file_size_mb:.1f} MB current file")
+            
+            # Process CSV in chunks
             try:
+                chunk_num = 0
                 for chunk in self.system.csv_reader.read_csv_chunks(csv_path):
-                    # Process chunk
-                    processed = self.system.data_processor.process_chunk(chunk)
+                    chunk_num += 1
                     
-                    if processed.empty:
-                        continue
+                    # Filter for African countries
+                    african_data = self.system.data_processor.process_chunk(chunk)
                     
-                    # Only insert records from last 90 days to avoid duplicates
-                    if 'PostedDate' in processed.columns:
-                        try:
-                            processed['PostedDate_parsed'] = pd.to_datetime(
-                                processed['PostedDate'], 
-                                errors='coerce'
-                            )
-                            cutoff = datetime.now() - timedelta(days=90)
-                            processed = processed[processed['PostedDate_parsed'] >= cutoff]
-                        except:
-                            pass  # Process all if date parsing fails
-                    
-                    if processed.empty:
-                        continue
-                    
-                    # Insert to database
-                    inserted, duplicates = self.system.db_manager.insert_batch(
-                        processed, 
-                        self.system.country_manager
-                    )
-                    
-                    total_inserted += inserted
-                    total_duplicates += duplicates
+                    if not african_data.empty:
+                        # Insert/update with deduplication
+                        inserted, updated, skipped = self.system.db_manager.insert_or_update_batch(
+                            african_data,
+                            source=source_key
+                        )
+                        
+                        current_inserted += inserted
+                        current_updated += updated
+                        current_skipped += skipped
+                        
+                        # Update country statistics
+                        for country in african_data['PopCountry'].value_counts().index:
+                            if country not in self.country_stats:
+                                self.country_stats[country] = 0
+                            self.country_stats[country] += 1
+                        
+                        # Log progress
+                        if chunk_num % 10 == 0:
+                            logger.info(f"  Chunk {chunk_num}: {current_inserted} new, "
+                                      f"{current_updated} updated, {current_skipped} skipped")
                 
-                logger.info(f"Current CSV complete: {total_inserted} inserted, "
-                          f"{total_duplicates} duplicates")
+                # Update totals
+                self.total_inserted += current_inserted
+                self.total_updated += current_updated
+                self.total_skipped += current_skipped
+                
+                # Save progress
+                self._save_progress(source_key, "completed")
+                
+                logger.info(f"✅ Current data complete: {current_inserted} inserted, "
+                          f"{current_updated} updated, {current_skipped} skipped")
                 
             except Exception as e:
-                logger.error(f"Error processing current CSV: {e}")
+                logger.error(f"Error processing current data: {e}")
+                self._save_progress(source_key, "error")
                 
-        return total_inserted, total_duplicates
+        return current_inserted, current_updated, current_skipped
     
-    def run(self, skip_current: bool = False):
-        """Run the complete bootstrap process"""
+    def optimize_database(self):
+        """Optimize database after loading all data"""
+        logger.info("\n🔧 Optimizing database...")
+        
+        with self.system.db_manager.get_connection() as conn:
+            cur = conn.cursor()
+            
+            # Ensure all dates are normalized
+            logger.info("Normalizing any remaining dates...")
+            cur.execute("""
+                UPDATE opportunities 
+                SET PostedDate_normalized = 
+                    CASE 
+                        WHEN PostedDate LIKE '____-__-__ __-__-__' 
+                            THEN substr(PostedDate, 1, 10)
+                        WHEN PostedDate LIKE '____-__-__' 
+                            THEN PostedDate
+                        ELSE PostedDate_normalized
+                    END
+                WHERE PostedDate_normalized IS NULL 
+                  AND PostedDate IS NOT NULL
+            """)
+            
+            normalized = cur.rowcount
+            if normalized > 0:
+                logger.info(f"  Normalized {normalized} dates")
+            
+            # Remove any non-African countries that might have slipped through
+            logger.info("Verifying all records are African countries...")
+            
+            # Get all unique countries
+            cur.execute("SELECT DISTINCT PopCountry FROM opportunities WHERE PopCountry IS NOT NULL")
+            all_countries = [row[0] for row in cur.fetchall()]
+            
+            non_african = []
+            for country in all_countries:
+                if not self.system.country_manager.is_african_country(country):
+                    non_african.append(country)
+            
+            if non_african:
+                logger.warning(f"Found {len(non_african)} non-African countries, removing...")
+                for country in non_african:
+                    cur.execute("DELETE FROM opportunities WHERE PopCountry = ?", (country,))
+                    removed = cur.rowcount
+                    if removed > 0:
+                        logger.info(f"  Removed {removed} records for {country}")
+            
+            # Update statistics
+            cur.execute("ANALYZE")
+            
+            # Vacuum to reclaim space
+            conn.commit()
+            
+        # Run VACUUM in separate connection
+        conn = self.system.db_manager.get_connection().__enter__()
+        conn.execute("VACUUM")
+        conn.close()
+        
+        logger.info("✅ Database optimized")
+    
+    def run(self, start_year: int = 1998, end_year: Optional[int] = None, 
+            clear_first: bool = False, skip_current: bool = False):
+        """
+        Run complete bootstrap process
+        
+        Args:
+            start_year: First fiscal year to process (default 1998)
+            end_year: Last fiscal year to process (default current FY)
+            clear_first: Whether to clear database first
+            skip_current: Whether to skip current data
+        """
         start_time = datetime.now()
         
+        # Determine end year
+        if end_year is None:
+            today = datetime.today()
+            end_year = today.year if today.month < 10 else today.year + 1
+        
         logger.info("="*60)
-        logger.info("SAM.gov Historical Bootstrap - Optimized Version")
-        logger.info(f"Year range: FY{self.start_year} to FY{self.end_year}")
+        logger.info("SAM.gov Complete Historical Bootstrap")
+        logger.info(f"Processing FY{start_year} through FY{end_year}")
         logger.info(f"Database: {self.system.config.db_path}")
         logger.info("="*60)
         
+        # Clear if requested
+        if clear_first:
+            self.clear_database()
+        
         # Get initial statistics
         initial_stats = self.system.db_manager.get_statistics()
-        logger.info(f"Initial records: {initial_stats['total_records']:,}")
+        logger.info(f"Starting with {initial_stats['total_records']:,} records")
         
-        # Process historical archives
-        total_inserted = 0
-        total_duplicates = 0
+        # Process all archive years (ignoring FY2030 per requirements)
+        years_to_process = list(range(start_year, end_year + 1))
+        # Note: FY2030 exists but we're ignoring it
         
-        for year in range(self.start_year, self.end_year + 1):
-            inserted, duplicates = self.process_archive_year(year)
-            total_inserted += inserted
-            total_duplicates += duplicates
+        logger.info(f"Processing {len(years_to_process)} archive years...")
         
-        # Process current full CSV
+        for year in years_to_process:
+            self.process_archive_year(year)
+        
+        # Process current data
         if not skip_current:
-            inserted, duplicates = self.process_current_full()
-            total_inserted += inserted
-            total_duplicates += duplicates
+            self.process_current_data()
         
         # Optimize database
-        logger.info("\nOptimizing database...")
-        self.system.db_manager.optimize_database()
+        self.optimize_database()
         
         # Get final statistics
         final_stats = self.system.db_manager.get_statistics()
         
-        # Clean up progress file if all years completed
-        expected_years = set(range(self.start_year, self.end_year + 1))
-        if self.completed_years >= expected_years:
-            self.progress_file.unlink(missing_ok=True)
-        
-        # Report results
+        # Generate report
         elapsed = datetime.now() - start_time
-        logger.info("\n" + "="*60)
-        logger.info("Bootstrap Complete!")
-        logger.info(f"Time elapsed: {elapsed}")
-        logger.info(f"Total inserted: {total_inserted:,}")
-        logger.info(f"Total duplicates: {total_duplicates:,}")
-        logger.info(f"Final records: {final_stats['total_records']:,}")
-        logger.info(f"Database size: {final_stats['size_mb']:.1f} MB")
-        logger.info("\nTop 10 countries by opportunities:")
         
-        for country, count in list(final_stats['by_country'].items())[:10]:
+        logger.info("\n" + "="*60)
+        logger.info("BOOTSTRAP COMPLETE!")
+        logger.info("="*60)
+        logger.info(f"Time elapsed: {elapsed}")
+        logger.info(f"Total inserted: {self.total_inserted:,}")
+        logger.info(f"Total updated: {self.total_updated:,}")
+        logger.info(f"Total skipped: {self.total_skipped:,}")
+        logger.info(f"Final database records: {final_stats['total_records']:,}")
+        logger.info(f"Active opportunities: {final_stats['active_records']:,}")
+        logger.info(f"Database size: {final_stats['size_mb']:.1f} MB")
+        
+        logger.info("\n📊 Records by time period:")
+        logger.info(f"  Last 7 days: {final_stats['recent_7_days']:,}")
+        logger.info(f"  Last 30 days: {final_stats['recent_30_days']:,}")
+        logger.info(f"  Last year: {final_stats['recent_year']:,}")
+        logger.info(f"  Last 5 years: {final_stats['recent_5_years']:,}")
+        
+        logger.info("\n🌍 Top African countries:")
+        for country, count in list(final_stats['by_country'].items())[:15]:
             logger.info(f"  {country}: {count:,}")
         
-        logger.info("="*60)
+        logger.info("\n📅 Records by year:")
+        for year, count in sorted(final_stats['by_year'].items(), reverse=True)[:10]:
+            logger.info(f"  {year}: {count:,}")
+        
+        # Clean up progress file if complete
+        if self.progress_file.exists():
+            self.progress_file.unlink()
+        
+        logger.info("\n✅ Bootstrap completed successfully!")
+        logger.info("Your dashboard now has complete historical data from FY1998 to current!")
+
 
 def main():
     """Main entry point"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Bootstrap SAM.gov historical data")
-    parser.add_argument(
-        "--start-year", 
-        type=int, 
-        default=1998,
-        help="Start year for historical data (default: 1998)"
+    parser = argparse.ArgumentParser(
+        description="Bootstrap complete SAM.gov historical data (FY1998-current)"
     )
     parser.add_argument(
-        "--end-year", 
-        type=int, 
+        "--start-year",
+        type=int,
+        default=1998,
+        help="Start fiscal year (default: 1998)"
+    )
+    parser.add_argument(
+        "--end-year",
+        type=int,
         default=None,
-        help="End year for historical data (default: current fiscal year)"
+        help="End fiscal year (default: current FY)"
+    )
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear existing database before loading"
     )
     parser.add_argument(
         "--skip-current",
         action="store_true",
-        help="Skip processing current full CSV"
+        help="Skip loading current opportunities"
     )
     parser.add_argument(
-        "--data-dir",
-        type=str,
-        default=None,
-        help="Override data directory location"
+        "--resume",
+        action="store_true",
+        help="Resume from previous progress"
     )
     
     args = parser.parse_args()
     
-    # Override config if data-dir specified
-    if args.data_dir:
-        os.environ['SAM_DATA_DIR'] = args.data_dir
-    
-    # Import pandas here to ensure it's available
-    global pd, timedelta
-    import pandas as pd
-    from datetime import timedelta
+    # Create bootstrap instance
+    bootstrap = HistoricalBootstrap()
     
     # Run bootstrap
-    bootstrap = HistoricalBootstrap(args.start_year, args.end_year)
-    bootstrap.run(skip_current=args.skip_current)
+    bootstrap.run(
+        start_year=args.start_year,
+        end_year=args.end_year,
+        clear_first=args.clear and not args.resume,
+        skip_current=args.skip_current
+    )
+
 
 if __name__ == "__main__":
     main()

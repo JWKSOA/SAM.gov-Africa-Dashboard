@@ -2,15 +2,20 @@ name: Update SAM.gov Database
 
 on:
   schedule:
-    # Run daily at midnight EST (5 AM UTC)
-    - cron: "0 5 * * *"
+    # Run daily at 2 AM EST (7 AM UTC)
+    # SAM.gov updates overnight, so this captures new data
+    - cron: "0 7 * * *"
   
   workflow_dispatch:
     inputs:
       lookback_days:
-        description: "Number of days to look back"
+        description: "Number of days to look back for updates"
         required: false
-        default: "7"
+        default: "14"
+      force_update:
+        description: "Force update even if already run today"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -26,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          lfs: true  # Important: Fetch LFS files
+          lfs: true
       
       - name: Setup Git LFS
         run: |
@@ -42,9 +47,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pandas requests numpy
       
-      - name: Create data directory if needed
+      - name: Create data directory
         run: mkdir -p data
       
       - name: Check database status
@@ -52,7 +57,7 @@ jobs:
         run: |
           if [ -f data/opportunities.db ]; then
             # Check if it's a real database or LFS pointer
-            FILE_SIZE=$(stat -c%s data/opportunities.db 2>/dev/null || stat -f%z data/opportunities.db)
+            FILE_SIZE=$(stat -c%s data/opportunities.db)
             echo "Database file size: $FILE_SIZE bytes"
             
             if [ $FILE_SIZE -lt 1000 ]; then
@@ -63,6 +68,7 @@ jobs:
             # Verify it's a valid SQLite database
             python -c "
 import sqlite3
+import sys
 try:
     conn = sqlite3.connect('data/opportunities.db')
     cur = conn.cursor()
@@ -72,18 +78,30 @@ try:
     conn.close()
 except Exception as e:
     print(f'Database check failed: {e}')
-    exit(1)
+    sys.exit(1)
             "
           else
-            echo "No database found, will create new one"
+            echo "No database found!"
+            echo "Run bootstrap_historical.py locally first to create initial database"
+            exit 1
           fi
       
       - name: Run daily update
+        env:
+          FORCE_UPDATE: ${{ github.event.inputs.force_update || 'false' }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '14' }}
         run: |
-          echo "Running incremental update..."
-          python download_and_update.py --lookback-days ${{ github.event.inputs.lookback_days || '7' }}
+          echo "Running daily update..."
+          echo "Lookback days: $LOOKBACK_DAYS"
+          echo "Force update: $FORCE_UPDATE"
+          
+          if [ "$FORCE_UPDATE" = "true" ]; then
+            python download_and_update.py --lookback-days $LOOKBACK_DAYS --force
+          else
+            python download_and_update.py --lookback-days $LOOKBACK_DAYS
+          fi
       
-      - name: Verify update
+      - name: Verify update results
         run: |
           python -c "
 import sqlite3
@@ -98,51 +116,84 @@ total = cur.fetchone()[0]
 print(f'Total records: {total:,}')
 
 # Check recent records
-try:
-    cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    cur.execute('''
-        SELECT COUNT(*) FROM opportunities 
-        WHERE PostedDate_normalized >= ?
-    ''', (cutoff,))
-    recent = cur.fetchone()[0]
-    print(f'Records from last 7 days: {recent:,}')
-except:
-    # Fallback if normalized column doesn't exist yet
-    cur.execute('''
-        SELECT COUNT(*) FROM opportunities 
-        WHERE date(PostedDate) >= date('now', '-7 days')
-    ''')
-    recent = cur.fetchone()[0]
-    print(f'Recent records (approx): {recent:,}')
+today = datetime.now().date().isoformat()
+cutoff_7 = (datetime.now().date() - timedelta(days=7)).isoformat()
+cutoff_30 = (datetime.now().date() - timedelta(days=30)).isoformat()
+
+cur.execute('''
+    SELECT COUNT(*) FROM opportunities 
+    WHERE PostedDate_normalized >= ? AND PostedDate_normalized <= ?
+''', (cutoff_7, today))
+recent_7 = cur.fetchone()[0]
+
+cur.execute('''
+    SELECT COUNT(*) FROM opportunities 
+    WHERE PostedDate_normalized >= ? AND PostedDate_normalized <= ?
+''', (cutoff_30, today))
+recent_30 = cur.fetchone()[0]
+
+print(f'Records from last 7 days: {recent_7:,}')
+print(f'Records from last 30 days: {recent_30:,}')
+
+# Show top countries
+cur.execute('''
+    SELECT PopCountry, COUNT(*) as cnt 
+    FROM opportunities 
+    GROUP BY PopCountry 
+    ORDER BY cnt DESC 
+    LIMIT 5
+''')
+
+print('\\nTop 5 countries:')
+for country, count in cur.fetchall():
+    print(f'  {country}: {count:,}')
 
 conn.close()
           "
       
-      - name: Commit changes
+      - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Track database with Git LFS
+      
+      - name: Track database with Git LFS
+        run: |
+          # Ensure database is tracked by Git LFS
           git lfs track "data/*.db"
           git add .gitattributes
-          
-          # Add changes
+      
+      - name: Commit and push changes
+        run: |
+          # Add all changes
           git add -A
           
-          # Check if there are changes
+          # Check if there are changes to commit
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
+            # Create commit message with timestamp
             TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
-            git commit -m "Update database [$TIMESTAMP]"
+            COMMIT_MSG="Automatic update [$TIMESTAMP]"
+            
+            # Check if any new records were added
+            if [ -f daily_update_*.log ]; then
+              NEW_RECORDS=$(grep "New records:" daily_update_*.log | tail -1 | grep -oE '[0-9]+' | tail -1 || echo "0")
+              if [ "$NEW_RECORDS" != "0" ]; then
+                COMMIT_MSG="$COMMIT_MSG - Added $NEW_RECORDS new opportunities"
+              fi
+            fi
+            
+            # Commit changes
+            git commit -m "$COMMIT_MSG"
             
             # Push with LFS
             git lfs push origin main --all
             git push origin main
+            
+            echo "✅ Changes pushed successfully"
           fi
       
-      - name: Upload artifacts on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -151,3 +202,10 @@ conn.close()
             *.log
             data/*.log
           retention-days: 7
+      
+      - name: Clean up logs
+        if: always()
+        run: |
+          # Remove old log files to prevent repository bloat
+          rm -f daily_update_*.log
+          rm -f bootstrap.log

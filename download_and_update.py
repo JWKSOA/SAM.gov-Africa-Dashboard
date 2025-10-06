@@ -1,335 +1,361 @@
 #!/usr/bin/env python3
 """
-download_and_update.py - Fixed version for daily updates
-Properly handles date normalization and column mapping
+download_and_update.py - Automatic daily updater for SAM.gov data
+Runs nightly to update database with new opportunities - no user intervention needed
 """
 
 import os
 import sys
 import logging
 import tempfile
-import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Tuple
+
 import pandas as pd
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from sam_utils import get_system, Config, logger
+from sam_utils import get_system, logger
 
-# Configure logging
+# Configure logging to file and console
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'daily_update_{datetime.now().strftime("%Y%m%d")}.log'),
+        logging.StreamHandler()
+    ]
 )
 
 class DailyUpdater:
-    """Handles daily incremental updates with proper date handling"""
+    """Handles automatic daily updates from SAM.gov"""
     
-    def __init__(self, lookback_days: int = 7):
-        """Initialize updater"""
+    def __init__(self, lookback_days: int = 14):
+        """
+        Initialize daily updater
+        
+        Args:
+            lookback_days: Number of days to look back for updates (default 14)
+                          Set higher to catch any missed updates
+        """
         self.system = get_system()
         self.lookback_days = lookback_days
-        self.new_by_country = {}
         
-    def ensure_database_ready(self):
-        """Ensure database has all required columns and normalization"""
-        with self.system.db_manager.get_connection() as conn:
-            cur = conn.cursor()
-            
-            # Get current columns
-            cur.execute("PRAGMA table_info(opportunities)")
-            existing_columns = {row[1] for row in cur.fetchall()}
-            
-            # Ensure PostedDate_normalized exists
-            if 'PostedDate_normalized' not in existing_columns:
-                logger.info("Adding PostedDate_normalized column...")
-                cur.execute('''
-                    ALTER TABLE opportunities 
-                    ADD COLUMN PostedDate_normalized DATE
-                ''')
-                conn.commit()
-                
-                # Normalize existing dates
-                logger.info("Normalizing existing dates...")
-                self.normalize_existing_dates(cur)
-                conn.commit()
-            
-            # Ensure indexes exist
-            cur.execute("SELECT name FROM sqlite_master WHERE type='index'")
-            existing_indexes = {row[0] for row in cur.fetchall()}
-            
-            if 'idx_posted_date_normalized' not in existing_indexes:
-                logger.info("Creating date index...")
-                cur.execute('''
-                    CREATE INDEX idx_posted_date_normalized 
-                    ON opportunities(PostedDate_normalized)
-                ''')
-                conn.commit()
+        # Track statistics
+        self.stats = {
+            'total_processed': 0,
+            'african_found': 0,
+            'inserted': 0,
+            'updated': 0,
+            'skipped': 0,
+            'by_country': {}
+        }
+        
+    def get_last_update_file(self) -> Path:
+        """Get path to last update tracking file"""
+        return self.system.config.data_dir / ".last_update.json"
     
-    def normalize_existing_dates(self, cur):
-        """Normalize any existing dates that aren't normalized"""
-        # Handle MM/DD/YYYY format (most common)
-        cur.execute('''
-            UPDATE opportunities 
-            SET PostedDate_normalized = 
-                substr(PostedDate, 7, 4) || '-' || 
-                substr(PostedDate, 1, 2) || '-' || 
-                substr(PostedDate, 4, 2)
-            WHERE PostedDate LIKE '__/__/____'
-            AND PostedDate_normalized IS NULL
-        ''')
+    def get_last_update_time(self) -> Optional[datetime]:
+        """Get timestamp of last successful update"""
+        last_update_file = self.get_last_update_file()
         
-        # Handle YYYY-MM-DD format
-        cur.execute('''
-            UPDATE opportunities 
-            SET PostedDate_normalized = date(substr(PostedDate, 1, 10))
-            WHERE (PostedDate LIKE '____-__-__' OR PostedDate LIKE '____-__-__T%')
-            AND PostedDate_normalized IS NULL
-        ''')
-    
-    def normalize_date_value(self, date_str: str) -> Optional[str]:
-        """Normalize a single date value to YYYY-MM-DD format"""
-        if not date_str or date_str == 'nan' or date_str == '':
-            return None
-        
-        try:
-            # Try pandas parsing first
-            parsed = pd.to_datetime(date_str, errors='coerce')
-            if pd.notna(parsed):
-                return parsed.strftime('%Y-%m-%d')
-        except:
-            pass
-        
-        # Manual parsing for common formats
-        date_str = str(date_str).strip()
-        
-        # MM/DD/YYYY format
-        if len(date_str) >= 10 and '/' in date_str:
-            parts = date_str.split('/')
-            if len(parts) == 3:
-                try:
-                    month = int(parts[0])
-                    day = int(parts[1])
-                    year = int(parts[2][:4])  # Handle years with time attached
-                    if 1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
-                        return f"{year:04d}-{month:02d}-{day:02d}"
-                except:
-                    pass
-        
-        # YYYY-MM-DD format
-        if len(date_str) >= 10 and '-' in date_str[:10]:
-            return date_str[:10]
-        
+        if last_update_file.exists():
+            try:
+                import json
+                with open(last_update_file, 'r') as f:
+                    data = json.load(f)
+                    return datetime.fromisoformat(data['timestamp'])
+            except:
+                pass
         return None
     
-    def get_cutoff_date(self) -> Tuple[datetime, str]:
-        """Determine cutoff date for processing"""
-        cutoff = datetime.now() - timedelta(days=self.lookback_days)
-        cutoff_str = cutoff.strftime('%Y-%m-%d')
-        logger.info(f"Processing records posted after {cutoff_str}")
-        return cutoff, cutoff_str
+    def save_update_time(self):
+        """Save current time as last update"""
+        import json
+        
+        last_update_file = self.get_last_update_file()
+        
+        try:
+            with open(last_update_file, 'w') as f:
+                json.dump({
+                    'timestamp': datetime.now().isoformat(),
+                    'stats': self.stats
+                }, f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save update time: {e}")
     
-    def process_incremental(self) -> Tuple[int, int, int]:
-        """Process only new/recent records"""
-        url = self.system.get_current_csv_url()
-        cutoff_date, cutoff_str = self.get_cutoff_date()
+    def should_run_update(self) -> bool:
+        """Check if update should run (hasn't run today)"""
+        last_update = self.get_last_update_time()
+        
+        if last_update is None:
+            logger.info("No previous update found - will run update")
+            return True
+        
+        # Check if last update was today
+        today = datetime.now().date()
+        last_date = last_update.date()
+        
+        if last_date >= today:
+            logger.info(f"Already updated today at {last_update.strftime('%H:%M:%S')}")
+            return False
+        
+        logger.info(f"Last update was {last_date}, running new update")
+        return True
+    
+    def process_current_csv(self) -> Tuple[int, int, int]:
+        """
+        Process the current opportunities CSV for updates
+        Returns: (inserted, updated, skipped)
+        """
+        logger.info("="*60)
+        logger.info("Processing Current Opportunities CSV")
+        logger.info("="*60)
+        
+        # Get current CSV URL
+        current_url = self.system.get_current_url()
         
         total_inserted = 0
-        total_duplicates = 0
-        total_old_skipped = 0
-        total_processed = 0
+        total_updated = 0
+        total_skipped = 0
         
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "current.csv"
             
             # Download current CSV
             logger.info("Downloading current opportunities CSV...")
-            if not self.system.http_client.download_file(url, csv_path):
+            if not self.system.http_client.download_file(current_url, csv_path, show_progress=False):
                 logger.error("Failed to download current CSV")
-                return 0, 0, 0
+                
+                # Try S3 fallback
+                s3_url = current_url.replace(
+                    "https://sam.gov/api/prod/fileextractservices/v1/api/download/",
+                    "https://falextracts.s3.amazonaws.com/"
+                ).replace("?privacy=Public", "")
+                
+                logger.info(f"Trying S3 fallback: {s3_url}")
+                if not self.system.http_client.download_file(s3_url, csv_path, show_progress=False):
+                    logger.error("Failed to download from both sources")
+                    return 0, 0, 0
             
-            # Process in chunks
-            logger.info("Processing CSV chunks...")
+            # Check file size
+            file_size_mb = csv_path.stat().st_size / (1024 * 1024)
+            logger.info(f"Downloaded {file_size_mb:.1f} MB file")
             
+            # Determine cutoff date for processing
+            cutoff_date = None
+            if self.lookback_days > 0:
+                cutoff_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime('%Y-%m-%d')
+                logger.info(f"Processing records posted after {cutoff_date}")
+            
+            # Process CSV in chunks
             try:
                 chunk_num = 0
-                for chunk in self.system.csv_reader.read_csv_chunks(csv_path):
+                for chunk in self.system.csv_reader.read_csv_chunks(csv_path, chunksize=5000):
                     chunk_num += 1
+                    self.stats['total_processed'] += len(chunk)
                     
-                    # Process chunk (filter for African countries)
-                    processed = self.system.data_processor.process_chunk(chunk)
-                    
-                    if processed.empty:
-                        continue
-                    
-                    # Normalize dates before checking or inserting
-                    if 'PostedDate' in processed.columns:
-                        processed['PostedDate_normalized'] = processed['PostedDate'].apply(self.normalize_date_value)
-                    
-                    total_processed += len(processed)
-                    
-                    # Process each record
-                    with self.system.db_manager.get_connection() as conn:
-                        cur = conn.cursor()
-                        
-                        for _, row in processed.iterrows():
-                            notice_id = str(row.get('NoticeID', '')).strip()
-                            if not notice_id or notice_id.lower() == 'nan':
-                                continue
-                            
-                            # Check if record is recent enough
-                            posted_date_norm = row.get('PostedDate_normalized')
-                            if posted_date_norm and posted_date_norm < cutoff_str:
-                                total_old_skipped += 1
-                                continue
-                            
-                            # Check if already exists
-                            cur.execute("SELECT 1 FROM opportunities WHERE NoticeID = ?", (notice_id,))
-                            if cur.fetchone():
-                                total_duplicates += 1
-                                continue
-                            
-                            # Prepare values for insertion
-                            columns_to_insert = ['NoticeID', 'PostedDate', 'PostedDate_normalized']
-                            values_to_insert = [notice_id, row.get('PostedDate'), posted_date_norm]
-                            
-                            # Add other columns
-                            for col in self.system.config.keep_columns:
-                                if col in row:
-                                    columns_to_insert.append(f'"{col}"')
-                                    values_to_insert.append(str(row.get(col, '') or ''))
-                            
-                            # Build and execute insert
-                            columns_str = ','.join(columns_to_insert)
-                            placeholders = ','.join(['?' for _ in columns_to_insert])
-                            
-                            sql = f"""
-                                INSERT OR IGNORE INTO opportunities ({columns_str}, updated_at)
-                                VALUES ({placeholders}, CURRENT_TIMESTAMP)
-                            """
-                            
-                            cur.execute(sql, values_to_insert)
-                            if cur.rowcount > 0:
-                                total_inserted += 1
-                                # Track by country
-                                country = row.get('PopCountry', 'Unknown')
-                                self.new_by_country[country] = self.new_by_country.get(country, 0) + 1
-                            else:
-                                total_duplicates += 1
-                    
-                    # Log progress every 5 chunks
-                    if chunk_num % 5 == 0:
-                        logger.info(
-                            f"Progress: Chunk {chunk_num}, "
-                            f"{total_processed} African records found, "
-                            f"{total_inserted} new, "
-                            f"{total_duplicates} duplicates, "
-                            f"{total_old_skipped} old"
+                    # Filter for recent records if cutoff specified
+                    if cutoff_date and 'PostedDate' in chunk.columns:
+                        # Normalize dates for comparison
+                        chunk['PostedDate_check'] = chunk['PostedDate'].apply(
+                            self.system.db_manager.normalize_posted_date
                         )
+                        
+                        # Filter for recent records
+                        recent_mask = chunk['PostedDate_check'] >= cutoff_date
+                        chunk = chunk[recent_mask]
+                        
+                        if chunk.empty:
+                            continue
+                    
+                    # Filter for African countries
+                    african_data = self.system.data_processor.process_chunk(chunk)
+                    
+                    if not african_data.empty:
+                        self.stats['african_found'] += len(african_data)
+                        
+                        # Insert/update with deduplication
+                        inserted, updated, skipped = self.system.db_manager.insert_or_update_batch(
+                            african_data,
+                            source="DAILY_UPDATE"
+                        )
+                        
+                        total_inserted += inserted
+                        total_updated += updated
+                        total_skipped += skipped
+                        
+                        # Track by country
+                        for country in african_data['PopCountry'].value_counts().index:
+                            if country not in self.stats['by_country']:
+                                self.stats['by_country'][country] = 0
+                            self.stats['by_country'][country] += 1
+                        
+                        # Log progress every 10 chunks
+                        if chunk_num % 10 == 0:
+                            logger.info(f"  Chunk {chunk_num}: Processed {self.stats['total_processed']:,} total, "
+                                      f"found {self.stats['african_found']} African")
                 
-                logger.info(
-                    f"\nUpdate complete: {total_processed} African records processed, "
-                    f"{total_inserted} new inserted, {total_duplicates} duplicates skipped, "
-                    f"{total_old_skipped} old records skipped"
-                )
+                # Update statistics
+                self.stats['inserted'] = total_inserted
+                self.stats['updated'] = total_updated
+                self.stats['skipped'] = total_skipped
+                
+                logger.info(f"\n✅ Processing complete:")
+                logger.info(f"  Total records processed: {self.stats['total_processed']:,}")
+                logger.info(f"  African opportunities found: {self.stats['african_found']:,}")
+                logger.info(f"  New records inserted: {total_inserted:,}")
+                logger.info(f"  Existing records updated: {total_updated:,}")
+                logger.info(f"  Duplicates/old skipped: {total_skipped:,}")
                 
             except Exception as e:
-                logger.error(f"Error processing CSV: {e}")
-                raise
+                logger.error(f"Error processing current CSV: {e}", exc_info=True)
                 
-        return total_inserted, total_duplicates, total_old_skipped
+        return total_inserted, total_updated, total_skipped
     
     def optimize_database(self):
-        """Optimize database after update"""
+        """Quick database optimization after update"""
         logger.info("Optimizing database...")
+        
         with self.system.db_manager.get_connection() as conn:
             cur = conn.cursor()
             
-            # Update statistics
-            cur.execute("ANALYZE")
-            
-            # Ensure all dates are normalized
-            cur.execute('''
+            # Update any missing normalized dates
+            cur.execute("""
                 UPDATE opportunities 
                 SET PostedDate_normalized = 
-                    substr(PostedDate, 7, 4) || '-' || 
-                    substr(PostedDate, 1, 2) || '-' || 
-                    substr(PostedDate, 4, 2)
-                WHERE PostedDate LIKE '__/__/____'
-                AND PostedDate_normalized IS NULL
-            ''')
+                    CASE 
+                        WHEN PostedDate LIKE '____-__-__ __-__-__' 
+                            THEN substr(PostedDate, 1, 10)
+                        WHEN PostedDate LIKE '____-__-__' 
+                            THEN PostedDate
+                        ELSE PostedDate_normalized
+                    END
+                WHERE PostedDate_normalized IS NULL 
+                  AND PostedDate IS NOT NULL
+                  AND PostedDate >= date('now', '-30 days')
+            """)
             
+            if cur.rowcount > 0:
+                logger.info(f"  Normalized {cur.rowcount} recent dates")
+            
+            # Update statistics for recent data
+            cur.execute("ANALYZE")
             conn.commit()
+        
+        logger.info("✅ Database optimized")
     
-    def run(self):
-        """Run the daily update process"""
+    def run(self, force: bool = False) -> bool:
+        """
+        Run the daily update process
+        
+        Args:
+            force: Force update even if already run today
+            
+        Returns:
+            True if update was performed, False if skipped
+        """
         start_time = datetime.now()
         
         logger.info("="*60)
-        logger.info("SAM.gov Daily Update - Fixed Version")
+        logger.info("SAM.gov Daily Update Process")
+        logger.info(f"Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"Database: {self.system.config.db_path}")
         logger.info("="*60)
         
-        # Ensure database is ready
-        self.ensure_database_ready()
+        # Check if database exists
+        if not self.system.config.db_path.exists():
+            logger.error("Database not found! Run bootstrap_historical.py first.")
+            return False
+        
+        # Check if should run
+        if not force and not self.should_run_update():
+            logger.info("Update not needed - skipping")
+            return False
         
         # Get initial statistics
-        try:
-            initial_stats = self.system.db_manager.get_statistics()
-            logger.info(f"Initial records: {initial_stats['total_records']:,}")
-            logger.info(f"Recent records (30d): {initial_stats['recent_records']:,}")
-        except:
-            initial_stats = {'total_records': 0}
+        initial_stats = self.system.db_manager.get_statistics()
+        logger.info(f"Initial database state:")
+        logger.info(f"  Total records: {initial_stats['total_records']:,}")
+        logger.info(f"  Recent (7 days): {initial_stats['recent_7_days']:,}")
+        logger.info(f"  Recent (30 days): {initial_stats['recent_30_days']:,}")
         
-        # Process incremental updates
-        inserted, duplicates, old_skipped = self.process_incremental()
+        # Process current CSV
+        inserted, updated, skipped = self.process_current_csv()
         
-        # Optimize if we inserted records
-        if inserted > 0:
+        # Optimize if changes were made
+        if inserted > 0 or updated > 0:
             self.optimize_database()
         
         # Get final statistics
-        try:
-            final_stats = self.system.db_manager.get_statistics()
-            
-            logger.info("\n" + "="*60)
-            logger.info("Daily Update Complete!")
-            logger.info(f"Time elapsed: {datetime.now() - start_time}")
-            logger.info(f"New records: {inserted}")
-            logger.info(f"Duplicates skipped: {duplicates}")
-            logger.info(f"Total records: {final_stats['total_records']:,}")
-            logger.info(f"Database size: {final_stats['size_mb']:.1f} MB")
-            
-            if self.new_by_country:
-                logger.info("\nNew records by country:")
-                for country, count in sorted(self.new_by_country.items(), 
-                                            key=lambda x: x[1], reverse=True)[:10]:
-                    logger.info(f"  {country}: +{count}")
-            
-            logger.info("="*60)
-        except Exception as e:
-            logger.warning(f"Could not get final statistics: {e}")
+        final_stats = self.system.db_manager.get_statistics()
+        
+        # Save update time
+        self.save_update_time()
+        
+        # Generate summary
+        elapsed = datetime.now() - start_time
+        
+        logger.info("\n" + "="*60)
+        logger.info("DAILY UPDATE COMPLETE")
+        logger.info("="*60)
+        logger.info(f"Time elapsed: {elapsed}")
+        logger.info(f"Changes made:")
+        logger.info(f"  New records: +{inserted:,}")
+        logger.info(f"  Updated records: {updated:,}")
+        logger.info(f"Final database state:")
+        logger.info(f"  Total records: {final_stats['total_records']:,}")
+        logger.info(f"  Recent (7 days): {final_stats['recent_7_days']:,}")
+        logger.info(f"  Recent (30 days): {final_stats['recent_30_days']:,}")
+        
+        if self.stats['by_country']:
+            logger.info("\nNew/updated records by country:")
+            sorted_countries = sorted(
+                self.stats['by_country'].items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            for country, count in sorted_countries[:10]:
+                logger.info(f"  {country}: {count:,}")
+        
+        logger.info("\n✅ Update completed successfully!")
+        logger.info("Dashboard data is now up to date.")
+        
+        return True
+
 
 def main():
-    """Main entry point"""
+    """Main entry point for daily updates"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Daily SAM.gov data update")
+    parser = argparse.ArgumentParser(
+        description="Daily update for SAM.gov Africa opportunities"
+    )
     parser.add_argument(
-        "--lookback-days", 
-        type=int, 
-        default=7,
-        help="Number of days to look back (default: 7)"
+        "--lookback-days",
+        type=int,
+        default=14,
+        help="Number of days to look back for updates (default: 14)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force update even if already run today"
     )
     
     args = parser.parse_args()
     
-    # Run updater
+    # Create updater instance
     updater = DailyUpdater(lookback_days=args.lookback_days)
-    updater.run()
+    
+    # Run update
+    success = updater.run(force=args.force)
+    
+    # Exit with appropriate code
+    sys.exit(0 if success else 1)
+
 
 if __name__ == "__main__":
     main()

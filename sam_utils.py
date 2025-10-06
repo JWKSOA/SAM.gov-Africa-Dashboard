@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-sam_utils.py - Shared utilities for SAM.gov data processing
-Fixed version with Streamlit Cloud database detection
+sam_utils.py - Complete SAM.gov data handler with exact column names and African country detection
+Handles all 54 African countries with proper ISO3 codes from AFRINIC region
 """
 
 import os
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import json
 
 import pandas as pd
+import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -29,339 +30,342 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION WITH EXACT SAM.GOV COLUMN NAMES FROM DOCUMENTATION
 # ============================================================================
-
-def find_database_path() -> Path:
-    """Find the database file, checking multiple locations"""
-    
-    # List of possible database locations in priority order
-    possible_paths = [
-        # 1. Check if running on Streamlit Cloud with mounted volume
-        Path("/mount/src/sam.gov-africa-dashboard/data/opportunities.db"),
-        
-        # 2. Check current directory structure (for Streamlit Cloud)
-        Path("data/opportunities.db"),
-        
-        # 3. Check if SAM_DATA_DIR environment variable is set
-        Path(os.environ.get('SAM_DATA_DIR', '')) / "opportunities.db" if os.environ.get('SAM_DATA_DIR') else None,
-        
-        # 4. Check home directory location (local development)
-        Path.home() / "sam_africa_data" / "opportunities.db",
-        
-        # 5. Check parent directory
-        Path("../data/opportunities.db"),
-        
-        # 6. Check absolute path for Streamlit Cloud
-        Path("/app/data/opportunities.db"),
-    ]
-    
-    # Remove None values
-    possible_paths = [p for p in possible_paths if p]
-    
-    # Find first existing database
-    for path in possible_paths:
-        if path.exists():
-            # Check if it's a real database file (not Git LFS pointer)
-            try:
-                # Git LFS pointer files are very small (< 1KB)
-                if path.stat().st_size > 1000:
-                    # Try to connect to verify it's a valid database
-                    conn = sqlite3.connect(str(path))
-                    conn.execute("SELECT COUNT(*) FROM opportunities LIMIT 1")
-                    conn.close()
-                    logger.info(f"Found valid database at: {path}")
-                    return path
-                else:
-                    logger.warning(f"Found Git LFS pointer at {path}, not actual database")
-            except Exception as e:
-                logger.warning(f"Invalid database at {path}: {e}")
-                continue
-    
-    # If no database found, return default path (will need to be created)
-    default_path = Path("data") / "opportunities.db"
-    logger.warning(f"No valid database found, using default: {default_path}")
-    return default_path
 
 @dataclass
 class Config:
-    """Centralized configuration for SAM.gov data processing"""
+    """Configuration with exact SAM.gov column names from Contract Opportunities Data Extract Documentation"""
     
-    # Dynamically find database path
-    db_path: Path = field(default_factory=find_database_path)
-    
-    # Set data_dir based on db_path
-    data_dir: Path = field(init=False)
-    cache_dir: Path = field(init=False)
+    # Database location
+    db_path: Path = field(default_factory=lambda: Path("data") / "opportunities.db")
+    data_dir: Path = field(default_factory=lambda: Path("data"))
+    cache_dir: Path = field(default_factory=lambda: Path("data") / ".cache")
     
     # Processing
-    chunk_size: int = 50_000
+    chunk_size: int = 10000  # Process in manageable chunks
     max_retries: int = 3
     timeout_seconds: int = 300
     
-    # URLs
-    primary_csv_url: str = (
+    # SAM.gov URLs
+    current_csv_url: str = (
         "https://sam.gov/api/prod/fileextractservices/v1/api/download/"
         "Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv?privacy=Public"
     )
-    fallback_csv_url: str = (
-        "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv"
-    )
-    archive_bases: List[str] = field(default_factory=lambda: [
-        "https://s3.amazonaws.com/falextracts/Contract%20Opportunities/Archived%20Data",
-        "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/Archived%20Data",
-    ])
     
-    # Database
-    keep_columns: List[str] = field(default_factory=lambda: [
-        "Title", "Department/Ind.Agency", "Sub-Tier", "Office", "PostedDate", 
-        "Type", "PopCountry", "AwardNumber", "AwardDate", "Award$", "Awardee",
-        "PrimaryContactTitle", "PrimaryContactFullName", "PrimaryContactEmail",
-        "PrimaryContactPhone", "OrganizationType", "CountryCode", "Link", "Description"
-    ])
+    archive_base_url: str = (
+        "https://sam.gov/api/prod/fileextractservices/v1/api/download/"
+        "Contract%20Opportunities/Archived%20Data/"
+    )
+    
+    # Alternative S3 URLs (fallback)
+    s3_current_url: str = (
+        "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/datagov/"
+        "ContractOpportunitiesFullCSV.csv"
+    )
+    
+    s3_archive_base: str = (
+        "https://falextracts.s3.amazonaws.com/Contract%20Opportunities/Archived%20Data/"
+    )
+    
+    # EXACT column names from SAM.gov documentation (Table 1: Opportunities Data Parameters)
+    # These match EXACTLY what's in the CSV files
+    sam_columns: Dict[str, str] = field(default_factory=lambda: {
+        "NoticeId": "The ID of the notice",
+        "Title": "The title of the opportunity",
+        "Sol#": "The number of the solicitation",
+        "Department/Ind.Agency": "The department (L1)",
+        "CGAC": "Common Governmentwide Accounting Classification",
+        "Sub-Tier": "The sub-tier (L2)",
+        "FPDS Code": "Federal Procurement Data System code",
+        "Office": "The office (L3)",
+        "AAC Code": "Activity Address Code",
+        "PostedDate": "Date posted (YYYY-MM-DD) (HH-MM-SS)",
+        "Type": "The opportunity's current type",
+        "BaseType": "The opportunity's original type",
+        "ArchiveType": "Archive type",
+        "ArchiveDate": "Date archived",
+        "SetASideCode": "Set aside code",
+        "SetASide": "Description of the set aside",
+        "ResponseDeadLine": "Deadline date to respond",
+        "NaicsCode": "NAICS code",
+        "ClassificationCode": "Classification code",
+        "PopStreetAddress": "Place of performance street address",
+        "PopCity": "Place of performance city",
+        "PopState": "Place of performance state",
+        "PopZip": "Place of performance zip",
+        "PopCountry": "Place of performance country",
+        "Active": "If Active = Yes, then opportunity is active",
+        "AwardNumber": "The award number",
+        "AwardDate": "Date the opportunity was awarded",
+        "Award$": "Monetary amount of the award",
+        "Awardee": "Name and location of the awardee",
+        "PrimaryContactTitle": "Title of the primary contact",
+        "PrimaryContactFullName": "Primary contact's full name",
+        "PrimaryContactEmail": "Primary contact's email",
+        "PrimaryContactPhone": "Primary contact's phone number",
+        "PrimaryContactFax": "Primary contact's fax number",
+        "SecondaryContactTitle": "Title of the secondary contact",
+        "SecondaryContactFullName": "Secondary contact's full name",
+        "SecondaryContactEmail": "Secondary contact's email",
+        "SecondaryContactPhone": "Secondary contact's phone number",
+        "SecondaryContactFax": "Secondary contact's fax number",
+        "OrganizationType": "Type of organization",
+        "State": "Office address state",
+        "City": "Office address city",
+        "ZipCode": "Office address zip code",
+        "CountryCode": "Office address country code",
+        "AdditionalInfoLink": "Any additional info link",
+        "Link": "The direct UI link to the opportunity",
+        "Description": "Description of the opportunity"
+    })
     
     def __post_init__(self):
-        """Set derived paths and create necessary directories"""
-        self.data_dir = self.db_path.parent
-        self.cache_dir = self.data_dir / ".cache"
-        
-        # Only create directories if we have write access
-        try:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
-            logger.warning(f"Cannot create directories at {self.data_dir} (read-only filesystem?)")
+        """Create necessary directories"""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
-# AFRICAN COUNTRIES DATA
+# AFRICAN COUNTRIES DATA - ALL 54 COUNTRIES WITH ISO3 CODES
 # ============================================================================
 
-class CountryManager:
-    """Centralized country data management"""
+class AfricanCountryManager:
+    """Manages identification of all 54 African countries using AFRINIC region codes"""
     
-    # Complete list of 54 African countries with ISO3 codes
+    # All 54 African countries with their ISO3 codes from AFRINIC
+    # Source: https://www.nro.net/list-of-country-codes-in-the-afrinic-region/
     AFRICAN_COUNTRIES = {
-        "ALGERIA": "DZA", "ANGOLA": "AGO", "BENIN": "BEN", "BOTSWANA": "BWA",
-        "BURKINA FASO": "BFA", "BURUNDI": "BDI", "CABO VERDE": "CPV", "CAMEROON": "CMR",
-        "CENTRAL AFRICAN REPUBLIC": "CAF", "CHAD": "TCD", "COMOROS": "COM",
-        "CONGO": "COG", "DEMOCRATIC REPUBLIC OF THE CONGO": "COD", "DJIBOUTI": "DJI",
-        "EGYPT": "EGY", "EQUATORIAL GUINEA": "GNQ", "ERITREA": "ERI", "ESWATINI": "SWZ",
-        "ETHIOPIA": "ETH", "GABON": "GAB", "GAMBIA": "GMB", "GHANA": "GHA",
-        "GUINEA": "GIN", "GUINEA-BISSAU": "GNB", "IVORY COAST": "CIV", "KENYA": "KEN",
-        "LESOTHO": "LSO", "LIBERIA": "LBR", "LIBYA": "LBY", "MADAGASCAR": "MDG",
-        "MALAWI": "MWI", "MALI": "MLI", "MAURITANIA": "MRT", "MAURITIUS": "MUS",
-        "MOROCCO": "MAR", "MOZAMBIQUE": "MOZ", "NAMIBIA": "NAM", "NIGER": "NER",
-        "NIGERIA": "NGA", "RWANDA": "RWA", "SAO TOME AND PRINCIPE": "STP",
-        "SENEGAL": "SEN", "SEYCHELLES": "SYC", "SIERRA LEONE": "SLE", "SOMALIA": "SOM",
-        "SOUTH AFRICA": "ZAF", "SOUTH SUDAN": "SSD", "SUDAN": "SDN", "TANZANIA": "TZA",
-        "TOGO": "TGO", "TUNISIA": "TUN", "UGANDA": "UGA", "ZAMBIA": "ZMB", "ZIMBABWE": "ZWE"
+        # North Africa
+        "ALGERIA": "DZA",
+        "EGYPT": "EGY", 
+        "LIBYA": "LBY",
+        "MOROCCO": "MAR",
+        "SUDAN": "SDN",
+        "TUNISIA": "TUN",
+        
+        # West Africa
+        "BENIN": "BEN",
+        "BURKINA FASO": "BFA",
+        "CAPE VERDE": "CPV",  # Also Cabo Verde
+        "CÔTE D'IVOIRE": "CIV",  # Also Ivory Coast
+        "GAMBIA": "GMB",
+        "GHANA": "GHA",
+        "GUINEA": "GIN",
+        "GUINEA-BISSAU": "GNB",
+        "LIBERIA": "LBR",
+        "MALI": "MLI",
+        "MAURITANIA": "MRT",
+        "NIGER": "NER",
+        "NIGERIA": "NGA",
+        "SENEGAL": "SEN",
+        "SIERRA LEONE": "SLE",
+        "TOGO": "TGO",
+        
+        # Central Africa
+        "ANGOLA": "AGO",
+        "CAMEROON": "CMR",
+        "CENTRAL AFRICAN REPUBLIC": "CAF",
+        "CHAD": "TCD",
+        "CONGO": "COG",  # Republic of Congo
+        "DEMOCRATIC REPUBLIC OF THE CONGO": "COD",  # DRC
+        "EQUATORIAL GUINEA": "GNQ",
+        "GABON": "GAB",
+        "SÃO TOMÉ AND PRÍNCIPE": "STP",
+        
+        # East Africa
+        "BURUNDI": "BDI",
+        "COMOROS": "COM",
+        "DJIBOUTI": "DJI",
+        "ERITREA": "ERI",
+        "ETHIOPIA": "ETH",
+        "KENYA": "KEN",
+        "MADAGASCAR": "MDG",
+        "MALAWI": "MWI",
+        "MAURITIUS": "MUS",
+        "MOZAMBIQUE": "MOZ",
+        "RWANDA": "RWA",
+        "SEYCHELLES": "SYC",
+        "SOMALIA": "SOM",
+        "SOUTH SUDAN": "SSD",
+        "TANZANIA": "TZA",
+        "UGANDA": "UGA",
+        "ZAMBIA": "ZMB",
+        "ZIMBABWE": "ZWE",
+        
+        # Southern Africa
+        "BOTSWANA": "BWA",
+        "ESWATINI": "SWZ",  # Formerly Swaziland
+        "LESOTHO": "LSO",
+        "NAMIBIA": "NAM",
+        "SOUTH AFRICA": "ZAF"
     }
     
-    # Comprehensive mappings including variations
-    MAPPINGS = {
-        # Algeria
-        "algeria": "DZA", "dza": "DZA", "algérie": "DZA", "dzair": "DZA",
-        # Angola
-        "angola": "AGO", "ago": "AGO",
-        # Benin
-        "benin": "BEN", "ben": "BEN", "bénin": "BEN", "dahomey": "BEN",
-        # Botswana
-        "botswana": "BWA", "bwa": "BWA", "bechuanaland": "BWA",
-        # Burkina Faso
-        "burkina faso": "BFA", "bfa": "BFA", "burkina": "BFA", "upper volta": "BFA",
-        # Burundi
-        "burundi": "BDI", "bdi": "BDI",
-        # Cabo Verde
-        "cabo verde": "CPV", "cpv": "CPV", "cape verde": "CPV", "cap vert": "CPV",
-        # Cameroon
-        "cameroon": "CMR", "cmr": "CMR", "cameroun": "CMR", "kamerun": "CMR",
-        # Central African Republic
-        "central african republic": "CAF", "caf": "CAF", "car": "CAF", "centrafrique": "CAF",
-        # Chad
-        "chad": "TCD", "tcd": "TCD", "tchad": "TCD",
-        # Comoros
-        "comoros": "COM", "com": "COM", "comores": "COM", "juzur al-qamar": "COM",
-        # Congo (Brazzaville)
-        "congo": "COG", "cog": "COG", "congo-brazzaville": "COG", "republic of congo": "COG",
-        "congo brazzaville": "COG", "republic of the congo": "COG",
-        # Congo (Kinshasa)
-        "democratic republic of the congo": "COD", "cod": "COD", "drc": "COD", 
-        "dr congo": "COD", "congo-kinshasa": "COD", "zaire": "COD", "congo kinshasa": "COD",
-        # Djibouti
-        "djibouti": "DJI", "dji": "DJI", "jabuuti": "DJI", "gabuuti": "DJI",
-        # Egypt
-        "egypt": "EGY", "egy": "EGY", "misr": "EGY", "masr": "EGY",
-        # Equatorial Guinea
-        "equatorial guinea": "GNQ", "gnq": "GNQ", "guinea ecuatorial": "GNQ",
-        # Eritrea
-        "eritrea": "ERI", "eri": "ERI", "ertra": "ERI",
-        # Eswatini
-        "eswatini": "SWZ", "swz": "SWZ", "swaziland": "SWZ", "ngwane": "SWZ",
-        # Ethiopia
-        "ethiopia": "ETH", "eth": "ETH", "abyssinia": "ETH", "ityop'ia": "ETH",
-        # Gabon
-        "gabon": "GAB", "gab": "GAB",
-        # Gambia
-        "gambia": "GMB", "gmb": "GMB", "the gambia": "GMB",
-        # Ghana
-        "ghana": "GHA", "gha": "GHA", "gold coast": "GHA",
-        # Guinea
-        "guinea": "GIN", "gin": "GIN", "guinée": "GIN", "guinea conakry": "GIN",
-        # Guinea-Bissau
-        "guinea-bissau": "GNB", "gnb": "GNB", "guinea bissau": "GNB", "guiné-bissau": "GNB",
-        # Ivory Coast
-        "ivory coast": "CIV", "civ": "CIV", "côte d'ivoire": "CIV", "cote d'ivoire": "CIV",
-        "cote divoire": "CIV", "costa do marfim": "CIV",
-        # Kenya
-        "kenya": "KEN", "ken": "KEN",
-        # Lesotho
-        "lesotho": "LSO", "lso": "LSO", "basutoland": "LSO",
-        # Liberia
-        "liberia": "LBR", "lbr": "LBR",
-        # Libya
-        "libya": "LBY", "lby": "LBY", "libyan arab jamahiriya": "LBY",
-        # Madagascar
-        "madagascar": "MDG", "mdg": "MDG", "malagasy": "MDG",
-        # Malawi
-        "malawi": "MWI", "mwi": "MWI", "nyasaland": "MWI",
-        # Mali
-        "mali": "MLI", "mli": "MLI", "french sudan": "MLI",
-        # Mauritania
-        "mauritania": "MRT", "mrt": "MRT", "mauritanie": "MRT", "muritaniya": "MRT",
-        # Mauritius
-        "mauritius": "MUS", "mus": "MUS", "maurice": "MUS", "moris": "MUS",
-        # Morocco
-        "morocco": "MAR", "mar": "MAR", "maroc": "MAR", "maghrib": "MAR",
-        # Mozambique
-        "mozambique": "MOZ", "moz": "MOZ", "moçambique": "MOZ", "mocambique": "MOZ",
-        # Namibia
-        "namibia": "NAM", "nam": "NAM", "south west africa": "NAM",
-        # Niger
-        "niger": "NER", "ner": "NER",
-        # Nigeria
-        "nigeria": "NGA", "nga": "NGA",
-        # Rwanda
-        "rwanda": "RWA", "rwa": "RWA", "ruanda": "RWA",
-        # São Tomé and Príncipe
-        "são tomé and príncipe": "STP", "stp": "STP", "sao tome and principe": "STP",
-        "são tomé": "STP", "sao tome": "STP",
-        # Senegal
-        "senegal": "SEN", "sen": "SEN", "sénégal": "SEN", "senegaal": "SEN",
-        # Seychelles
-        "seychelles": "SYC", "syc": "SYC", "sesel": "SYC",
-        # Sierra Leone
-        "sierra leone": "SLE", "sle": "SLE",
-        # Somalia
-        "somalia": "SOM", "som": "SOM", "soomaaliya": "SOM",
-        # South Africa
-        "south africa": "ZAF", "zaf": "ZAF", "rsa": "ZAF", "suid-afrika": "ZAF",
-        # South Sudan
-        "south sudan": "SSD", "ssd": "SSD", "southern sudan": "SSD",
-        # Sudan
-        "sudan": "SDN", "sdn": "SDN",
-        # Tanzania
-        "tanzania": "TZA", "tza": "TZA", "tanganyika": "TZA", "zanzibar": "TZA",
-        # Togo
-        "togo": "TGO", "tgo": "TGO", "togoland": "TGO",
-        # Tunisia
-        "tunisia": "TUN", "tun": "TUN", "tunisie": "TUN", "tunis": "TUN",
-        # Uganda
-        "uganda": "UGA", "uga": "UGA",
-        # Zambia
-        "zambia": "ZMB", "zmb": "ZMB", "northern rhodesia": "ZMB",
-        # Zimbabwe
-        "zimbabwe": "ZWE", "zwe": "ZWE", "rhodesia": "ZWE", "southern rhodesia": "ZWE"
+    # Alternative names and spellings
+    ALTERNATIVE_NAMES = {
+        "CABO VERDE": "CPV",
+        "CAPE VERDE": "CPV",
+        "IVORY COAST": "CIV",
+        "COTE D'IVOIRE": "CIV",
+        "COTE DIVOIRE": "CIV",
+        "DRC": "COD",
+        "DR CONGO": "COD",
+        "CONGO KINSHASA": "COD",
+        "CONGO-KINSHASA": "COD",
+        "CONGO BRAZZAVILLE": "COG",
+        "CONGO-BRAZZAVILLE": "COG",
+        "SAO TOME": "STP",
+        "SWAZILAND": "SWZ",
+        "THE GAMBIA": "GMB",
+        "GUINEE": "GIN",
+        "GUINEE-BISSAU": "GNB",
+        "TANZANIE": "TZA",
+        "REPUBLIQUE CENTRAFRICAINE": "CAF",
+        "CAR": "CAF",  # Central African Republic
+        "RSA": "ZAF",  # Republic of South Africa
+        "UAE": None,  # Not African - United Arab Emirates
+        "USA": None,  # Not African - United States
+        "UK": None,   # Not African - United Kingdom
     }
     
     def __init__(self):
+        # Create set of all ISO3 codes for quick lookup
         self.iso3_codes = set(self.AFRICAN_COUNTRIES.values())
         
-    def format_country_display(self, iso_code: str) -> str:
-        """Convert ISO3 to 'COUNTRY NAME (ISO3)' format"""
-        for country, code in self.AFRICAN_COUNTRIES.items():
-            if code == iso_code:
-                return f"{country} ({code})"
-        return iso_code
-    
-    def standardize_country_code(self, value: str) -> str:
-        """Convert any country name or code to 'COUNTRY NAME (ISO3)' format"""
-        if not value:
-            return value
+        # Create reverse mapping
+        self.iso_to_country = {v: k for k, v in self.AFRICAN_COUNTRIES.items()}
         
-        cleaned = str(value).strip().lower()
+        # Combined lookup dictionary
+        self.all_lookups = {}
         
-        # Check if already ISO code
-        if cleaned.upper() in self.iso3_codes:
-            return self.format_country_display(cleaned.upper())
-        
-        # Try to match against mappings
-        if cleaned in self.MAPPINGS:
-            iso_code = self.MAPPINGS[cleaned]
-            return self.format_country_display(iso_code)
-        
-        # Check partial matches
-        for mapping_key, iso_code in self.MAPPINGS.items():
-            if mapping_key in cleaned or cleaned in mapping_key:
-                return self.format_country_display(iso_code)
-        
-        return value
+        # Add main countries
+        for country, iso in self.AFRICAN_COUNTRIES.items():
+            self.all_lookups[country.upper()] = iso
+            self.all_lookups[iso] = iso
+            
+        # Add alternatives
+        for alt, iso in self.ALTERNATIVE_NAMES.items():
+            if iso:  # Only add if it maps to an African country
+                self.all_lookups[alt.upper()] = iso
     
     def is_african_country(self, value: str) -> bool:
-        """Check if value represents an African country"""
-        if not value:
+        """
+        Check if value represents an African country
+        Handles country names, ISO codes, and various formats
+        """
+        if not value or pd.isna(value) or value == '':
             return False
             
-        value_lower = str(value).lower().strip()
+        # Clean the value
+        value_clean = str(value).upper().strip()
         
-        # Check ISO codes
-        if value.upper() in self.iso3_codes:
+        # Remove common non-country values
+        if value_clean in ['NONE', 'NULL', 'N/A', 'UNKNOWN', '']:
+            return False
+            
+        # Direct ISO3 code match
+        if value_clean in self.iso3_codes:
             return True
             
-        # Check against mappings
-        if value_lower in self.MAPPINGS:
-            return True
+        # Direct lookup match
+        if value_clean in self.all_lookups:
+            return self.all_lookups[value_clean] is not None
             
-        # Check partial matches
-        for mapping_key in self.MAPPINGS.keys():
-            if mapping_key in value_lower or value_lower in mapping_key:
+        # Check if ISO code is contained in the string (e.g., "Kenya (KEN)")
+        for iso in self.iso3_codes:
+            if iso in value_clean:
                 return True
                 
-        # Check for ISO codes within the text (e.g., "KENYA (KEN)")
-        for iso in self.iso3_codes:
-            if iso in value.upper():
+        # Check for partial country name matches
+        for country_name in self.AFRICAN_COUNTRIES.keys():
+            if country_name in value_clean or value_clean in country_name:
+                return True
+                
+        # Check alternative names
+        for alt_name, iso in self.ALTERNATIVE_NAMES.items():
+            if iso and (alt_name in value_clean or value_clean in alt_name):
                 return True
                 
         return False
+    
+    def standardize_country(self, value: str) -> str:
+        """
+        Standardize country to 'COUNTRY NAME (ISO3)' format
+        This ensures consistent storage and display
+        """
+        if not value or pd.isna(value):
+            return value
+            
+        value_clean = str(value).upper().strip()
+        
+        # If already in correct format
+        if '(' in value and ')' in value:
+            # Extract ISO code to verify
+            iso_match = re.search(r'\(([A-Z]{3})\)', value)
+            if iso_match and iso_match.group(1) in self.iso3_codes:
+                return value  # Already correct
+                
+        # Look up the ISO code
+        iso_code = None
+        
+        # Direct ISO code
+        if value_clean in self.iso3_codes:
+            iso_code = value_clean
+            
+        # Lookup table
+        elif value_clean in self.all_lookups:
+            iso_code = self.all_lookups[value_clean]
+            
+        # Search for ISO in string
+        else:
+            for iso in self.iso3_codes:
+                if iso in value_clean:
+                    iso_code = iso
+                    break
+                    
+        # If we found an ISO code, format properly
+        if iso_code and iso_code in self.iso_to_country:
+            country_name = self.iso_to_country[iso_code]
+            return f"{country_name} ({iso_code})"
+            
+        # Return original if not African
+        return value
+    
+    def get_all_search_terms(self) -> List[str]:
+        """Get all possible search terms for African countries"""
+        terms = []
+        
+        # Add all ISO codes
+        terms.extend(self.iso3_codes)
+        
+        # Add all country names
+        terms.extend(self.AFRICAN_COUNTRIES.keys())
+        
+        # Add alternative names
+        terms.extend([k for k, v in self.ALTERNATIVE_NAMES.items() if v])
+        
+        return terms
 
 # ============================================================================
-# DATABASE MANAGEMENT
+# DATABASE MANAGEMENT WITH PROPER DEDUPLICATION
 # ============================================================================
 
 class DatabaseManager:
-    """Manages all database operations with proper error handling"""
+    """Database operations with proper SAM.gov schema and deduplication"""
     
     def __init__(self, config: Config):
         self.config = config
         self.db_path = config.db_path
         
-        # Check if database exists and is valid
-        if not self.db_path.exists():
-            logger.error(f"Database not found at {self.db_path}")
-            logger.info("Please run bootstrap_historical.py or download_and_update.py to create database")
-        elif self.db_path.stat().st_size < 1000:
-            logger.error(f"Database at {self.db_path} appears to be a Git LFS pointer, not actual database")
-            logger.info("Database needs to be properly downloaded or created")
-        
     @contextmanager
     def get_connection(self):
-        """Context manager for database connections"""
+        """Get database connection with optimizations"""
         conn = None
         try:
             conn = sqlite3.connect(str(self.db_path))
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA temp_store=MEMORY")
-            conn.execute("PRAGMA mmap_size=30000000000")
+            conn.execute("PRAGMA cache_size=10000")
             yield conn
             conn.commit()
         except Exception as e:
@@ -374,21 +378,66 @@ class DatabaseManager:
                 conn.close()
     
     def initialize_database(self):
-        """Create tables and indexes if they don't exist"""
-        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
-            logger.warning(f"Cannot initialize database - file missing or invalid at {self.db_path}")
-            return
-            
+        """Create database with exact SAM.gov schema"""
         with self.get_connection() as conn:
             cur = conn.cursor()
             
-            # Create main table
-            columns_def = ",\n    ".join([f'"{col}" TEXT' for col in self.config.keep_columns])
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS opportunities (
+            # Drop existing table to start fresh
+            cur.execute("DROP TABLE IF EXISTS opportunities")
+            
+            # Create table with exact SAM.gov column names
+            # Note: Using quotes for columns with special characters
+            cur.execute("""
+                CREATE TABLE opportunities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    "NoticeID" TEXT UNIQUE NOT NULL,
-                    {columns_def},
+                    NoticeId TEXT UNIQUE NOT NULL,
+                    Title TEXT,
+                    "Sol#" TEXT,
+                    "Department/Ind.Agency" TEXT,
+                    CGAC TEXT,
+                    "Sub-Tier" TEXT,
+                    "FPDS Code" TEXT,
+                    Office TEXT,
+                    "AAC Code" TEXT,
+                    PostedDate TEXT,
+                    PostedDate_normalized DATE,
+                    Type TEXT,
+                    BaseType TEXT,
+                    ArchiveType TEXT,
+                    ArchiveDate TEXT,
+                    SetASideCode TEXT,
+                    SetASide TEXT,
+                    ResponseDeadLine TEXT,
+                    NaicsCode TEXT,
+                    ClassificationCode TEXT,
+                    PopStreetAddress TEXT,
+                    PopCity TEXT,
+                    PopState TEXT,
+                    PopZip TEXT,
+                    PopCountry TEXT,
+                    Active TEXT,
+                    AwardNumber TEXT,
+                    AwardDate TEXT,
+                    "Award$" TEXT,
+                    Awardee TEXT,
+                    PrimaryContactTitle TEXT,
+                    PrimaryContactFullName TEXT,
+                    PrimaryContactEmail TEXT,
+                    PrimaryContactPhone TEXT,
+                    PrimaryContactFax TEXT,
+                    SecondaryContactTitle TEXT,
+                    SecondaryContactFullName TEXT,
+                    SecondaryContactEmail TEXT,
+                    SecondaryContactPhone TEXT,
+                    SecondaryContactFax TEXT,
+                    OrganizationType TEXT,
+                    State TEXT,
+                    City TEXT,
+                    ZipCode TEXT,
+                    CountryCode TEXT,
+                    AdditionalInfoLink TEXT,
+                    Link TEXT,
+                    Description TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -396,358 +445,341 @@ class DatabaseManager:
             
             # Create indexes for performance
             indexes = [
-                ('idx_notice_id', 'NoticeID'),
-                ('idx_posted_date', 'PostedDate'),
-                ('idx_pop_country', 'PopCountry'),
-                ('idx_country_code', 'CountryCode'),
-                ('idx_department', '"Department/Ind.Agency"'),
-                ('idx_created_at', 'created_at'),
+                "CREATE INDEX idx_notice_id ON opportunities(NoticeId)",
+                "CREATE INDEX idx_posted_date ON opportunities(PostedDate)",
+                "CREATE INDEX idx_posted_norm ON opportunities(PostedDate_normalized)",
+                "CREATE INDEX idx_pop_country ON opportunities(PopCountry)",
+                "CREATE INDEX idx_active ON opportunities(Active)",
+                "CREATE INDEX idx_type ON opportunities(Type)",
+                "CREATE INDEX idx_dept ON opportunities(\"Department/Ind.Agency\")",
+                "CREATE INDEX idx_country_date ON opportunities(PopCountry, PostedDate_normalized DESC)"
             ]
             
-            for idx_name, column in indexes:
-                cur.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {idx_name} 
-                    ON opportunities({column})
-                """)
+            for idx_sql in indexes:
+                cur.execute(idx_sql)
             
-            # Create composite indexes for common queries
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_country_date 
-                ON opportunities(PopCountry, PostedDate DESC)
-            """)
-            
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_dept_date 
-                ON opportunities("Department/Ind.Agency", PostedDate DESC)
-            """)
-            
-            logger.info("Database initialized successfully")
+            conn.commit()
+            logger.info("Database initialized with SAM.gov schema")
     
-    def get_last_update_date(self) -> Optional[datetime]:
-        """Get the most recent PostedDate from database"""
-        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
+    def normalize_posted_date(self, date_str: str) -> Optional[str]:
+        """
+        Normalize PostedDate from SAM.gov format to YYYY-MM-DD
+        SAM.gov format: YYYY-MM-DD HH-MM-SS
+        """
+        if not date_str or pd.isna(date_str) or date_str == '':
             return None
             
-        with self.get_connection() as conn:
-            cur = conn.cursor()
-            result = cur.execute("""
-                SELECT MAX(PostedDate) 
-                FROM opportunities 
-                WHERE PostedDate IS NOT NULL
-            """).fetchone()
+        date_str = str(date_str).strip()
+        
+        # Already normalized
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+            return date_str
             
-            if result and result[0]:
-                try:
-                    return pd.to_datetime(result[0])
-                except:
-                    return None
-            return None
+        # SAM.gov format with time
+        if ' ' in date_str:
+            # Split date and time
+            date_part = date_str.split(' ')[0]
+            if re.match(r'^\d{4}-\d{2}-\d{2}$', date_part):
+                return date_part
+                
+        # Try pandas parsing as fallback
+        try:
+            parsed = pd.to_datetime(date_str, errors='coerce')
+            if pd.notna(parsed):
+                return parsed.strftime('%Y-%m-%d')
+        except:
+            pass
+            
+        return None
     
-    def insert_batch(self, df: pd.DataFrame, country_manager: CountryManager) -> Tuple[int, int]:
-        """Insert batch of records with deduplication"""
+    def insert_or_update_batch(self, df: pd.DataFrame, source: str = "unknown") -> Tuple[int, int, int]:
+        """
+        Insert or update batch with deduplication
+        Returns: (inserted, updated, skipped)
+        """
         if df.empty:
-            return 0, 0
-        
-        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
-            logger.error("Cannot insert - database not available")
-            return 0, 0
+            return 0, 0, 0
             
-        # Standardize country codes
-        if "PopCountry" in df.columns:
-            df["PopCountry"] = df["PopCountry"].apply(country_manager.standardize_country_code)
-        if "CountryCode" in df.columns:
-            df["CountryCode"] = df["CountryCode"].apply(country_manager.standardize_country_code)
-        
-        # Ensure all required columns exist
-        for col in self.config.keep_columns:
-            if col not in df.columns:
-                df[col] = None
-                
         inserted = 0
-        duplicates = 0
+        updated = 0
+        skipped = 0
         
         with self.get_connection() as conn:
             cur = conn.cursor()
             
-            # Prepare insert statement
-            columns = ['NoticeID'] + self.config.keep_columns
-            placeholders = ','.join(['?' for _ in columns])
-            columns_str = ','.join([f'"{col}"' for col in columns])
-            
-            sql = f"""
-                INSERT OR IGNORE INTO opportunities ({columns_str}, updated_at)
-                VALUES ({placeholders}, CURRENT_TIMESTAMP)
-            """
-            
-            # Insert records
             for _, row in df.iterrows():
-                notice_id = str(row.get('NoticeID', '')).strip()
-                if not notice_id or notice_id.lower() == 'nan':
+                # Get NoticeId
+                notice_id = str(row.get('NoticeId', '')).strip()
+                if not notice_id or notice_id in ['nan', 'None', '']:
+                    skipped += 1
                     continue
-                    
-                values = [notice_id] + [str(row.get(col, '') or '') for col in self.config.keep_columns]
                 
-                cur.execute(sql, values)
-                if cur.rowcount > 0:
-                    inserted += 1
-                else:
-                    duplicates += 1
+                # Check if exists
+                cur.execute("SELECT PostedDate FROM opportunities WHERE NoticeId = ?", (notice_id,))
+                existing = cur.fetchone()
+                
+                if existing:
+                    # Compare dates to keep most recent
+                    existing_date = existing[0]
+                    new_date = row.get('PostedDate', '')
                     
-        logger.info(f"Inserted {inserted} records, skipped {duplicates} duplicates")
-        return inserted, duplicates
+                    # Normalize dates for comparison
+                    existing_norm = self.normalize_posted_date(existing_date)
+                    new_norm = self.normalize_posted_date(new_date)
+                    
+                    # Update if new is more recent
+                    if new_norm and existing_norm and new_norm > existing_norm:
+                        # Build UPDATE statement
+                        update_cols = []
+                        update_vals = []
+                        
+                        for col in self.config.sam_columns.keys():
+                            if col in row.index and col != 'NoticeId':
+                                if '/' in col or '#' in col or '$' in col:
+                                    update_cols.append(f'"{col}" = ?')
+                                else:
+                                    update_cols.append(f'{col} = ?')
+                                update_vals.append(row[col] if pd.notna(row[col]) else None)
+                        
+                        # Add normalized date
+                        update_cols.append('PostedDate_normalized = ?')
+                        update_vals.append(new_norm)
+                        
+                        # Add updated timestamp
+                        update_cols.append('updated_at = CURRENT_TIMESTAMP')
+                        
+                        # Execute update
+                        update_vals.append(notice_id)
+                        sql = f"UPDATE opportunities SET {', '.join(update_cols)} WHERE NoticeId = ?"
+                        
+                        try:
+                            cur.execute(sql, update_vals)
+                            updated += 1
+                        except Exception as e:
+                            logger.error(f"Update error for {notice_id}: {e}")
+                            skipped += 1
+                    else:
+                        skipped += 1
+                else:
+                    # Insert new record
+                    columns = ['NoticeId']
+                    values = [notice_id]
+                    
+                    # Add PostedDate_normalized
+                    posted_date = row.get('PostedDate', '')
+                    normalized_date = self.normalize_posted_date(posted_date)
+                    columns.append('PostedDate_normalized')
+                    values.append(normalized_date)
+                    
+                    # Add all other columns
+                    for col in self.config.sam_columns.keys():
+                        if col != 'NoticeId' and col in row.index:
+                            if '/' in col or '#' in col or '$' in col:
+                                columns.append(f'"{col}"')
+                            else:
+                                columns.append(col)
+                            values.append(row[col] if pd.notna(row[col]) else None)
+                    
+                    # Build and execute INSERT
+                    placeholders = ','.join(['?' for _ in values])
+                    columns_str = ','.join(columns)
+                    
+                    sql = f"INSERT OR IGNORE INTO opportunities ({columns_str}) VALUES ({placeholders})"
+                    
+                    try:
+                        cur.execute(sql, values)
+                        if cur.rowcount > 0:
+                            inserted += 1
+                        else:
+                            skipped += 1
+                    except Exception as e:
+                        logger.error(f"Insert error for {notice_id}: {e}")
+                        skipped += 1
+            
+            conn.commit()
+            
+        logger.info(f"Batch from {source}: {inserted} inserted, {updated} updated, {skipped} skipped")
+        return inserted, updated, skipped
     
-    def optimize_database(self):
-        """Optimize database performance"""
-        if not self.db_path.exists() or self.db_path.stat().st_size < 1000:
-            return
-            
-        with self.get_connection() as conn:
-            cur = conn.cursor()
-            
-            # Update statistics
-            cur.execute("ANALYZE")
-            
-            # Optimize query planner
-            cur.execute("PRAGMA optimize")
-            
-            # Check if VACUUM needed (if DB > 100MB and > 20% fragmentation)
-            cur.execute("PRAGMA page_count")
-            page_count = cur.fetchone()[0]
-            cur.execute("PRAGMA freelist_count")
-            freelist_count = cur.fetchone()[0]
-            
-            fragmentation = (freelist_count / page_count) * 100 if page_count > 0 else 0
-            db_size_mb = (page_count * 4096) / (1024 * 1024)  # Assuming 4KB pages
-            
-            if db_size_mb > 100 and fragmentation > 20:
-                logger.info(f"Running VACUUM (size: {db_size_mb:.1f}MB, fragmentation: {fragmentation:.1f}%)")
-                conn.execute("VACUUM")
-            
     def get_statistics(self) -> Dict[str, Any]:
-        """Get database statistics"""
-        if not self.db_path.exists():
-            return {
-                'total_records': 0,
-                'by_country': {},
-                'recent_records': 0,
-                'size_mb': 0,
-                'error': 'Database not found'
-            }
+        """Get comprehensive database statistics"""
+        stats = {
+            'total_records': 0,
+            'active_records': 0,
+            'recent_7_days': 0,
+            'recent_30_days': 0,
+            'recent_year': 0,
+            'recent_5_years': 0,
+            'by_country': {},
+            'by_year': {},
+            'size_mb': 0
+        }
         
-        if self.db_path.stat().st_size < 1000:
-            return {
-                'total_records': 0,
-                'by_country': {},
-                'recent_records': 0,
-                'size_mb': 0,
-                'error': 'Database is Git LFS pointer - needs proper download'
-            }
+        if not self.db_path.exists():
+            return stats
             
         try:
             with self.get_connection() as conn:
                 cur = conn.cursor()
                 
-                stats = {}
-                
                 # Total records
                 cur.execute("SELECT COUNT(*) FROM opportunities")
                 stats['total_records'] = cur.fetchone()[0]
                 
-                # Records by country
+                # Active records
+                cur.execute("SELECT COUNT(*) FROM opportunities WHERE Active = 'Yes'")
+                stats['active_records'] = cur.fetchone()[0]
+                
+                # Recent records
+                today = datetime.now().date().isoformat()
+                
+                for days, key in [(7, 'recent_7_days'), (30, 'recent_30_days'), 
+                                  (365, 'recent_year'), (1825, 'recent_5_years')]:
+                    cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
+                    cur.execute("""
+                        SELECT COUNT(*) FROM opportunities 
+                        WHERE PostedDate_normalized >= ? AND PostedDate_normalized <= ?
+                    """, (cutoff, today))
+                    stats[key] = cur.fetchone()[0]
+                
+                # By country (top 20)
                 cur.execute("""
                     SELECT PopCountry, COUNT(*) 
                     FROM opportunities 
                     WHERE PopCountry IS NOT NULL 
                     GROUP BY PopCountry 
                     ORDER BY COUNT(*) DESC
+                    LIMIT 20
                 """)
                 stats['by_country'] = dict(cur.fetchall())
                 
-                # Recent records (last 30 days)
+                # By year
                 cur.execute("""
-                    SELECT COUNT(*) 
+                    SELECT substr(PostedDate_normalized, 1, 4) as year, COUNT(*) 
                     FROM opportunities 
-                    WHERE date(PostedDate) >= date('now', '-30 days')
+                    WHERE PostedDate_normalized IS NOT NULL 
+                    GROUP BY year 
+                    ORDER BY year DESC
                 """)
-                stats['recent_records'] = cur.fetchone()[0]
+                stats['by_year'] = dict(cur.fetchall())
                 
                 # Database size
                 stats['size_mb'] = self.db_path.stat().st_size / (1024 * 1024)
                 
-                return stats
         except Exception as e:
             logger.error(f"Error getting statistics: {e}")
-            return {
-                'total_records': 0,
-                'by_country': {},
-                'recent_records': 0,
-                'size_mb': 0,
-                'error': str(e)
-            }
+            
+        return stats
 
 # ============================================================================
 # DATA PROCESSING
 # ============================================================================
 
 class DataProcessor:
-    """Handles all data processing operations"""
+    """Process SAM.gov data with African country filtering"""
     
-    def __init__(self, config: Config, country_manager: CountryManager):
+    def __init__(self, config: Config, country_manager: AfricanCountryManager):
         self.config = config
         self.country_manager = country_manager
         
-    def normalize_string(self, s: str) -> str:
-        """Normalize string for comparison"""
-        return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
-    
-    def ensure_notice_id(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure NoticeID column exists"""
-        if 'NoticeID' in df.columns:
-            return df
-            
-        # Try to find ID column
-        id_candidates = {
-            'noticeid', 'noticeidnumber', 'documentid', 'solicitationnumber',
-            'solicitationid', 'opportunityid', 'referencenumber', 'refid'
-        }
-        
-        normalized_cols = {self.normalize_string(col): col for col in df.columns}
-        
-        for candidate in id_candidates:
-            if candidate in normalized_cols:
-                df['NoticeID'] = df[normalized_cols[candidate]].astype(str)
-                return df
-        
-        # Generate hash-based ID if no ID column found
-        def generate_id(row):
-            parts = [
-                str(row.get('Title', '')),
-                str(row.get('PostedDate', '')),
-                str(row.get('Type', '')),
-                str(row.get('Link', '')),
-                str(row.get('Department/Ind.Agency', '')),
-                str(row.get('PopCountry', '')),
-            ]
-            content = '|'.join(parts)
-            return hashlib.sha256(content.encode('utf-8', errors='ignore')).hexdigest()[:24]
-        
-        df['NoticeID'] = df.apply(generate_id, axis=1)
-        return df
-    
-    def filter_african_rows(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Filter dataframe for African countries only"""
-        if df.empty:
-            return df
-            
-        # Ensure country columns exist
-        for col in ['PopCountry', 'CountryCode']:
-            if col not in df.columns:
-                df[col] = ''
-        
-        # Filter rows
-        mask = df.apply(self._is_african_row, axis=1)
-        return df[mask].copy()
-    
-    def _is_african_row(self, row) -> bool:
-        """Check if a row is related to an African country"""
-        pop_country = str(row.get('PopCountry', '') or '')
-        country_code = str(row.get('CountryCode', '') or '')
-        
-        return (self.country_manager.is_african_country(pop_country) or 
-                self.country_manager.is_african_country(country_code))
-    
     def process_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
-        """Process a chunk of data"""
-        # Clean column names
-        chunk.columns = [col.strip() for col in chunk.columns]
-        
+        """
+        Process a chunk of SAM.gov data
+        Filter for African countries only
+        """
+        if chunk.empty:
+            return chunk
+            
+        # Ensure PopCountry column exists
+        if 'PopCountry' not in chunk.columns:
+            logger.warning("No PopCountry column found in chunk")
+            return pd.DataFrame()
+            
         # Filter for African countries
-        african_rows = self.filter_african_rows(chunk)
+        african_mask = chunk['PopCountry'].apply(self.country_manager.is_african_country)
+        african_data = chunk[african_mask].copy()
         
-        if african_rows.empty:
-            return african_rows
-        
-        # Ensure NoticeID exists
-        african_rows = self.ensure_notice_id(african_rows)
-        
-        # Standardize country codes
-        if 'PopCountry' in african_rows.columns:
-            african_rows['PopCountry'] = african_rows['PopCountry'].apply(
-                self.country_manager.standardize_country_code
+        if not african_data.empty:
+            # Standardize country names
+            african_data['PopCountry'] = african_data['PopCountry'].apply(
+                self.country_manager.standardize_country
             )
-        if 'CountryCode' in african_rows.columns:
-            african_rows['CountryCode'] = african_rows['CountryCode'].apply(
-                self.country_manager.standardize_country_code
-            )
-        
-        return african_rows
+            
+            logger.info(f"Found {len(african_data)} African opportunities in chunk")
+            
+        return african_data
 
 # ============================================================================
-# HTTP UTILITIES
+# HTTP CLIENT
 # ============================================================================
 
 class HTTPClient:
-    """Robust HTTP client with retry logic"""
+    """HTTP client for downloading SAM.gov files"""
     
     def __init__(self, config: Config):
         self.config = config
         self.session = self._create_session()
-    
+        
     def _create_session(self) -> requests.Session:
-        """Create HTTP session with retry strategy"""
+        """Create session with retry logic"""
         session = requests.Session()
         
         retry_strategy = Retry(
             total=self.config.max_retries,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "HEAD"]
         )
         
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         
+        # Set headers
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
         return session
     
-    def download_file(self, url: str, dest_path: Path, stream: bool = True) -> bool:
-        """Download file with progress reporting"""
+    def download_file(self, url: str, dest_path: Path, show_progress: bool = True) -> bool:
+        """Download file with progress indication"""
         try:
             logger.info(f"Downloading from {url}")
             
-            response = self.session.get(
-                url, 
-                stream=stream, 
-                timeout=self.config.timeout_seconds
-            )
+            response = self.session.get(url, stream=True, timeout=self.config.timeout_seconds)
             response.raise_for_status()
             
             total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
             
             with open(dest_path, 'wb') as f:
-                downloaded = 0
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
                         
-                        if total_size > 0 and downloaded % (10 * 1024 * 1024) == 0:
-                            progress = (downloaded / total_size) * 100
-                            logger.info(f"Download progress: {progress:.1f}%")
-            
-            logger.info(f"Downloaded to {dest_path}")
+                        if show_progress and total_size > 0:
+                            if downloaded % (10 * 1024 * 1024) == 0:  # Every 10MB
+                                progress = (downloaded / total_size) * 100
+                                logger.info(f"Progress: {progress:.1f}%")
+                            
+            logger.info(f"Download complete: {dest_path}")
             return True
             
-        except Exception as e:
-            logger.error(f"Download failed: {e}")
-            return False
-    
-    def check_url_exists(self, url: str) -> bool:
-        """Check if URL exists using HEAD request"""
-        try:
-            response = self.session.head(url, timeout=10)
-            return response.status_code in (200, 206, 302, 403)
-        except:
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Download failed for {url}: {e}")
+            
+            # Try fallback URL if available
+            if "sam.gov" in url and "s3.amazonaws.com" not in url:
+                # Convert to S3 URL
+                s3_url = url.replace(
+                    "https://sam.gov/api/prod/fileextractservices/v1/api/download/",
+                    "https://falextracts.s3.amazonaws.com/"
+                ).replace("?privacy=Public", "")
+                
+                logger.info(f"Trying S3 fallback URL: {s3_url}")
+                return self.download_file(s3_url, dest_path, show_progress)
+                
             return False
 
 # ============================================================================
@@ -755,150 +787,87 @@ class HTTPClient:
 # ============================================================================
 
 class CSVReader:
-    """Handles CSV reading with multiple encoding fallbacks"""
-    
-    ENCODINGS = [
-        ('utf-8', 'replace'),
-        ('utf-8-sig', 'strict'),
-        ('cp1252', 'replace'),
-        ('latin-1', 'replace'),
-        ('iso-8859-1', 'replace')
-    ]
+    """Read SAM.gov CSV files with proper encoding handling"""
     
     def __init__(self, config: Config):
         self.config = config
-    
-    def read_csv_chunks(self, filepath: Path):
-        """Read CSV in chunks with encoding detection"""
-        last_error = None
         
-        for encoding, errors in self.ENCODINGS:
+    def read_csv_chunks(self, filepath: Path, chunksize: int = None):
+        """Read CSV in chunks with encoding detection"""
+        if chunksize is None:
+            chunksize = self.config.chunk_size
+            
+        # Try different encodings
+        encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']
+        
+        for encoding in encodings:
             try:
-                logger.info(f"Reading CSV with encoding={encoding}")
+                logger.info(f"Reading CSV with encoding: {encoding}")
                 
+                # Read with all columns as strings to avoid type issues
                 for chunk in pd.read_csv(
                     filepath,
-                    dtype=str,
                     encoding=encoding,
-                    encoding_errors=errors,
+                    dtype=str,
+                    chunksize=chunksize,
                     on_bad_lines='skip',
-                    chunksize=self.config.chunk_size,
                     low_memory=False
                 ):
                     yield chunk
                     
                 return  # Success
                 
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Failed with {encoding}: {e}")
+            except UnicodeDecodeError:
+                logger.warning(f"Failed with encoding {encoding}, trying next...")
                 continue
-        
-        # All encodings failed
-        raise last_error
+            except Exception as e:
+                logger.error(f"Error reading CSV with {encoding}: {e}")
+                continue
+                
+        # If all encodings fail
+        raise ValueError(f"Could not read CSV file with any encoding: {filepath}")
 
 # ============================================================================
-# CACHE MANAGER
-# ============================================================================
-
-class CacheManager:
-    """Simple file-based cache for processed data"""
-    
-    def __init__(self, config: Config):
-        self.cache_dir = config.cache_dir
-        try:
-            self.cache_dir.mkdir(exist_ok=True)
-        except:
-            logger.warning(f"Cannot create cache directory at {self.cache_dir}")
-    
-    def get_cache_path(self, key: str) -> Path:
-        """Get cache file path for a key"""
-        safe_key = re.sub(r'[^a-zA-Z0-9_-]', '_', key)
-        return self.cache_dir / f"{safe_key}.json"
-    
-    def get(self, key: str, max_age: timedelta = timedelta(hours=1)) -> Optional[Any]:
-        """Get cached value if not expired"""
-        cache_path = self.get_cache_path(key)
-        
-        if not cache_path.exists():
-            return None
-        
-        # Check age
-        age = datetime.now() - datetime.fromtimestamp(cache_path.stat().st_mtime)
-        if age > max_age:
-            return None
-        
-        try:
-            with open(cache_path, 'r') as f:
-                return json.load(f)
-        except:
-            return None
-    
-    def set(self, key: str, value: Any):
-        """Set cached value"""
-        cache_path = self.get_cache_path(key)
-        
-        try:
-            with open(cache_path, 'w') as f:
-                json.dump(value, f, default=str)
-        except Exception as e:
-            logger.warning(f"Cache write failed: {e}")
-    
-    def clear(self):
-        """Clear all cache files"""
-        try:
-            for cache_file in self.cache_dir.glob("*.json"):
-                cache_file.unlink()
-        except:
-            pass
-
-# ============================================================================
-# MAIN FACADE
+# MAIN SYSTEM
 # ============================================================================
 
 class SAMDataSystem:
-    """Main facade for all SAM.gov data operations"""
+    """Main system coordinating all SAM.gov data operations"""
     
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
-        self.country_manager = CountryManager()
+        self.country_manager = AfricanCountryManager()
         self.db_manager = DatabaseManager(self.config)
         self.data_processor = DataProcessor(self.config, self.country_manager)
         self.http_client = HTTPClient(self.config)
         self.csv_reader = CSVReader(self.config)
-        self.cache_manager = CacheManager(self.config)
         
-        # Initialize database only if it exists
-        if self.config.db_path.exists() and self.config.db_path.stat().st_size > 1000:
-            self.db_manager.initialize_database()
-        else:
-            logger.warning(f"Database not available at {self.config.db_path}")
+        # Initialize database
+        self.db_manager.initialize_database()
+        
+    def get_archive_years(self) -> List[int]:
+        """Get list of all archive years to process"""
+        # Based on your requirements: FY1998 through FY2025 (ignoring FY2030)
+        years = list(range(1998, 2026))  # 1998 to 2025
+        # Note: FY2030 file exists but we're ignoring it per requirements
+        
+        return years
     
-    def get_current_csv_url(self) -> str:
-        """Determine which CSV URL to use"""
-        if self.http_client.check_url_exists(self.config.primary_csv_url):
-            return self.config.primary_csv_url
-        else:
-            logger.warning("Primary URL not available, using fallback")
-            return self.config.fallback_csv_url
-    
-    def get_archive_url(self, year: int) -> Optional[str]:
-        """Get archive URL for a specific year"""
+    def get_archive_url(self, year: int) -> str:
+        """Get archive URL for a specific fiscal year"""
         filename = f"FY{year}_archived_opportunities.csv"
-        
-        for base in self.config.archive_bases:
-            url = f"{base}/{filename}"
-            if self.http_client.check_url_exists(url):
-                return url
-        
-        return None
+        return f"{self.config.archive_base_url}{filename}?privacy=Public"
+    
+    def get_current_url(self) -> str:
+        """Get URL for current opportunities CSV"""
+        return self.config.current_csv_url
 
-# Create singleton instance
-_system_instance = None
+# Singleton instance
+_system = None
 
 def get_system() -> SAMDataSystem:
-    """Get singleton instance of SAM data system"""
-    global _system_instance
-    if _system_instance is None:
-        _system_instance = SAMDataSystem()
-    return _system_instance
+    """Get or create system instance"""
+    global _system
+    if _system is None:
+        _system = SAMDataSystem()
+    return _system
