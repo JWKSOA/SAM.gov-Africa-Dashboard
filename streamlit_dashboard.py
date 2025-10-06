@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-streamlit_dashboard.py - Fixed version with correct data queries
-UI remains exactly the same, only data handling is fixed
+streamlit_dashboard.py - Fixed version with correct data queries and working hyperlinks
 """
 
 import os
@@ -56,11 +55,12 @@ def get_period_counts() -> dict:
         # Get statistics directly from database manager
         stats = system.db_manager.get_statistics()
         
+        # Fix for Last 5 Years count - use the actual value from stats
         return {
             'last_7_days': stats.get('recent_7_days', 0),
             'last_30_days': stats.get('recent_30_days', 0),
             'last_year': stats.get('recent_year', 0),
-            'last_5_years': 0,  # Will calculate if needed
+            'last_5_years': stats.get('recent_5_years', 0),  # Fixed: Now uses actual value
             'all_time': stats.get('total_records', 0)
         }
         
@@ -290,18 +290,29 @@ def display_period_content(df: pd.DataFrame, period_name: str):
         available_cols = [col for col in display_cols if col in df.columns]
         
         if available_cols:
-            display_df = df[available_cols].head(100)
+            display_df = df[available_cols].head(100).copy()  # Use copy() to avoid warnings
             
             # Clean up any NaN values for display
             display_df = display_df.fillna('')
             
-            # Format links if present
+            # Fix hyperlinks using st.column_config.LinkColumn
             if 'Link' in display_df.columns:
-                display_df['Link'] = display_df['Link'].apply(
-                    lambda x: f'[View]({x})' if x and x.startswith('http') else x
+                # Keep the original links as-is (don't convert to markdown)
+                # Streamlit's LinkColumn will handle the rendering
+                st.dataframe(
+                    display_df,
+                    column_config={
+                        "Link": st.column_config.LinkColumn(
+                            "Link",
+                            help="Click to view opportunity on SAM.gov",
+                            display_text="View"
+                        )
+                    },
+                    hide_index=True,
+                    use_container_width=True
                 )
-            
-            st.dataframe(display_df, hide_index=True, use_container_width=True)
+            else:
+                st.dataframe(display_df, hide_index=True, use_container_width=True)
             
             # Download button
             csv = df.to_csv(index=False)

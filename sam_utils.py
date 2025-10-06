@@ -133,6 +133,7 @@ class CountryManager:
     """Manages identification of all 54 African countries using AFRINIC region codes"""
     
     # All 54 African countries with their ISO3 codes from AFRINIC
+    # Based on https://www.nro.net/list-of-country-codes-in-the-afrinic-region/
     AFRICAN_COUNTRIES = {
         # North Africa
         "ALGERIA": "DZA",
@@ -145,8 +146,8 @@ class CountryManager:
         # West Africa
         "BENIN": "BEN",
         "BURKINA FASO": "BFA",
-        "CAPE VERDE": "CPV",  # Also Cabo Verde
-        "CÔTE D'IVOIRE": "CIV",  # Also Ivory Coast
+        "CAPE VERDE": "CPV",
+        "CÔTE D'IVOIRE": "CIV",
         "GAMBIA": "GMB",
         "GHANA": "GHA",
         "GUINEA": "GIN",
@@ -199,31 +200,44 @@ class CountryManager:
         "SOUTH AFRICA": "ZAF"
     }
     
-    # Alternative names and spellings
+    # Alternative names and spellings (names only, not codes)
     ALTERNATIVE_NAMES = {
         "CABO VERDE": "CPV",
-        "CAPE VERDE": "CPV",
+        "CAPE VERDE ISLANDS": "CPV",
         "IVORY COAST": "CIV",
         "COTE D'IVOIRE": "CIV",
         "COTE DIVOIRE": "CIV",
         "DRC": "COD",
         "DR CONGO": "COD",
-        "CONGO KINSHASA": "COD",
+        "DEMOCRATIC REP OF CONGO": "COD",
+        "DEMOCRATIC REPUBLIC OF CONGO": "COD",
+        "CONGO, DEMOCRATIC REPUBLIC": "COD",
         "CONGO-KINSHASA": "COD",
-        "CONGO BRAZZAVILLE": "COG",
+        "CONGO KINSHASA": "COD",
         "CONGO-BRAZZAVILLE": "COG",
+        "CONGO BRAZZAVILLE": "COG",
+        "REPUBLIC OF THE CONGO": "COG",
+        "CONGO, REPUBLIC OF": "COG",
+        "SAO TOME AND PRINCIPE": "STP",
+        "SAO TOME & PRINCIPE": "STP",
         "SAO TOME": "STP",
         "SWAZILAND": "SWZ",
+        "KINGDOM OF ESWATINI": "SWZ",
         "THE GAMBIA": "GMB",
+        "GAMBIA, THE": "GMB",
         "GUINEE": "GIN",
+        "GUINEA BISSAU": "GNB",
         "GUINEE-BISSAU": "GNB",
+        "GUINEE BISSAU": "GNB",
         "TANZANIE": "TZA",
+        "UNITED REPUBLIC OF TANZANIA": "TZA",
         "REPUBLIQUE CENTRAFRICAINE": "CAF",
         "CAR": "CAF",  # Central African Republic
+        "CENTRAL AFRICAN REP": "CAF",
         "RSA": "ZAF",  # Republic of South Africa
-        "UAE": None,  # Not African - United Arab Emirates
-        "USA": None,  # Not African - United States
-        "UK": None,   # Not African - United Kingdom
+        "REPUBLIC OF SOUTH AFRICA": "ZAF",
+        "SOUTH SUDAN, REPUBLIC OF": "SSD",
+        "REPUBLIC OF SOUTH SUDAN": "SSD",
     }
     
     def __init__(self):
@@ -239,7 +253,7 @@ class CountryManager:
         # Add main countries
         for country, iso in self.AFRICAN_COUNTRIES.items():
             self.all_lookups[country.upper()] = iso
-            self.all_lookups[iso] = iso
+            # DON'T add ISO codes as keys here - we want to check them explicitly
             
         # Add alternatives
         for alt, iso in self.ALTERNATIVE_NAMES.items():
@@ -250,6 +264,7 @@ class CountryManager:
         """
         Check if value represents an African country
         Handles country names, ISO codes, and various formats
+        IMPORTANT: Returns False for non-African ISO codes like ITA, SAU, CAN
         """
         if not value or pd.isna(value) or value == '':
             return False
@@ -260,29 +275,34 @@ class CountryManager:
         # Remove common non-country values
         if value_clean in ['NONE', 'NULL', 'N/A', 'UNKNOWN', '']:
             return False
+        
+        # Check if it's a raw ISO3 code (like "ITA", "SAU", "CAN")
+        # Only accept if it's an AFRICAN ISO3 code
+        if len(value_clean) == 3 and value_clean.isalpha():
+            # This is likely an ISO3 code
+            return value_clean in self.iso3_codes
             
-        # Direct ISO3 code match
-        if value_clean in self.iso3_codes:
+        # Check if it contains an African ISO code in parentheses (e.g., "KENYA (KEN)")
+        if '(' in value_clean and ')' in value_clean:
+            iso_match = re.search(r'\(([A-Z]{3})\)', value_clean)
+            if iso_match:
+                iso_code = iso_match.group(1)
+                return iso_code in self.iso3_codes
+        
+        # Direct lookup match for country names
+        if value_clean in self.all_lookups:
             return True
             
-        # Direct lookup match
-        if value_clean in self.all_lookups:
-            return self.all_lookups[value_clean] is not None
-            
-        # Check if ISO code is contained in the string (e.g., "Kenya (KEN)")
-        for iso in self.iso3_codes:
-            if iso in value_clean:
-                return True
-                
-        # Check for partial country name matches
-        for country_name in self.AFRICAN_COUNTRIES.keys():
-            if country_name in value_clean or value_clean in country_name:
-                return True
-                
-        # Check alternative names
-        for alt_name, iso in self.ALTERNATIVE_NAMES.items():
-            if iso and (alt_name in value_clean or value_clean in alt_name):
-                return True
+        # Check for partial country name matches (but be careful with short codes)
+        if len(value_clean) > 3:  # Don't do partial matches on short strings
+            for country_name in self.AFRICAN_COUNTRIES.keys():
+                if country_name in value_clean or value_clean in country_name:
+                    return True
+                    
+            # Check alternative names
+            for alt_name in self.ALTERNATIVE_NAMES.keys():
+                if alt_name in value_clean or value_clean in alt_name:
+                    return True
                 
         return False
     
@@ -306,27 +326,26 @@ class CountryManager:
         # Look up the ISO code
         iso_code = None
         
-        # Direct ISO code
-        if value_clean in self.iso3_codes:
+        # Direct ISO code (3-letter code)
+        if len(value_clean) == 3 and value_clean.isalpha() and value_clean in self.iso3_codes:
             iso_code = value_clean
             
-        # Lookup table
+        # Lookup table for country names
         elif value_clean in self.all_lookups:
             iso_code = self.all_lookups[value_clean]
             
         # Search for ISO in string
-        else:
-            for iso in self.iso3_codes:
-                if iso in value_clean:
-                    iso_code = iso
-                    break
+        elif '(' in value_clean and ')' in value_clean:
+            iso_match = re.search(r'\(([A-Z]{3})\)', value_clean)
+            if iso_match and iso_match.group(1) in self.iso3_codes:
+                iso_code = iso_match.group(1)
                     
         # If we found an ISO code, format properly
         if iso_code and iso_code in self.iso_to_country:
             country_name = self.iso_to_country[iso_code]
             return f"{country_name} ({iso_code})"
             
-        # Return original if not African
+        # Return original if not African (this shouldn't happen after filtering)
         return value
     
     def get_all_search_terms(self) -> List[str]:
