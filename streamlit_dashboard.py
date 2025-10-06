@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-streamlit_dashboard.py - Fixed SAM.gov Africa Dashboard
-All issues resolved including duplicate column names
+streamlit_dashboard.py - Fixed version with proper date filtering
 """
 
 import os
 import sys
-import json
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple, Any
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -21,9 +17,7 @@ import streamlit as st
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ============================================================================
-# CRITICAL: Page configuration MUST be the first Streamlit command
-# ============================================================================
+# Page config MUST be first Streamlit command
 st.set_page_config(
     page_title="🌍 SAM.gov Africa Dashboard",
     page_icon="🌍",
@@ -37,7 +31,6 @@ try:
 except ImportError as e:
     st.error("❌ Critical Error: Cannot import sam_utils module")
     st.error(f"Error details: {e}")
-    st.info("Please ensure sam_utils.py is in the repository")
     st.stop()
 
 # Initialize system
@@ -45,198 +38,168 @@ except ImportError as e:
 def init_system():
     """Initialize SAM data system (cached)"""
     try:
-        return get_system()
+        system = get_system()
+        # Ensure PostedDate_normalized column exists
+        with system.db_manager.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(opportunities)")
+            columns = {row[1] for row in cur.fetchall()}
+            
+            if 'PostedDate_normalized' not in columns:
+                st.warning("Database needs updating. Please run: python download_and_update.py")
+        
+        return system
     except Exception as e:
         st.error(f"Failed to initialize system: {e}")
         return None
 
-# Get contract counts for each period
 @st.cache_data(ttl=300)
-def get_period_counts() -> Dict[str, int]:
-    """Get contract counts for each time period"""
+def get_period_counts() -> dict:
+    """Get contract counts for each time period using normalized dates"""
     try:
         system = init_system()
         if not system:
-            return {
-                'last_7_days': 0,
-                'last_30_days': 0,
-                'last_year': 0,
-                'last_5_years': 0,
-                'all_time': 0
-            }
+            return {'last_7_days': 0, 'last_30_days': 0, 'last_year': 0, 
+                   'last_5_years': 0, 'all_time': 0}
         
         counts = {}
+        today = datetime.now().date().isoformat()
         
         with system.db_manager.get_connection() as conn:
             cur = conn.cursor()
             
-            # Get today's date for comparison
-            today = datetime.now().date()
+            # Check if PostedDate_normalized exists
+            cur.execute("PRAGMA table_info(opportunities)")
+            columns = {row[1] for row in cur.fetchall()}
             
-            # Last 7 days - using date arithmetic
-            seven_days_ago = (today - timedelta(days=7)).isoformat()
-            cur.execute("""
-                SELECT COUNT(*) FROM opportunities 
-                WHERE date(PostedDate) >= date(?)
-                AND date(PostedDate) <= date('now')
-            """, (seven_days_ago,))
-            counts['last_7_days'] = cur.fetchone()[0]
+            if 'PostedDate_normalized' in columns:
+                # Use normalized dates for accurate counting
+                periods = [
+                    ('last_7_days', 7),
+                    ('last_30_days', 30),
+                    ('last_year', 365),
+                    ('last_5_years', 1825)
+                ]
+                
+                for period_name, days in periods:
+                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+                    cur.execute("""
+                        SELECT COUNT(*) FROM opportunities 
+                        WHERE PostedDate_normalized >= ?
+                        AND PostedDate_normalized <= ?
+                    """, (cutoff_date, today))
+                    counts[period_name] = cur.fetchone()[0]
+            else:
+                # Fallback: use original PostedDate with text comparison
+                st.warning("Database needs updating for accurate date filtering")
+                
+                for period_name, days in [('last_7_days', 7), ('last_30_days', 30), 
+                                         ('last_year', 365), ('last_5_years', 1825)]:
+                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+                    cur.execute("""
+                        SELECT COUNT(*) FROM opportunities 
+                        WHERE date(PostedDate) >= date(?)
+                    """, (cutoff_date,))
+                    counts[period_name] = cur.fetchone()[0]
             
-            # Last 30 days
-            thirty_days_ago = (today - timedelta(days=30)).isoformat()
-            cur.execute("""
-                SELECT COUNT(*) FROM opportunities 
-                WHERE date(PostedDate) >= date(?)
-                AND date(PostedDate) <= date('now')
-            """, (thirty_days_ago,))
-            counts['last_30_days'] = cur.fetchone()[0]
-            
-            # Last year
-            one_year_ago = (today - timedelta(days=365)).isoformat()
-            cur.execute("""
-                SELECT COUNT(*) FROM opportunities 
-                WHERE date(PostedDate) >= date(?)
-                AND date(PostedDate) <= date('now')
-            """, (one_year_ago,))
-            counts['last_year'] = cur.fetchone()[0]
-            
-            # Last 5 years
-            five_years_ago = (today - timedelta(days=1825)).isoformat()
-            cur.execute("""
-                SELECT COUNT(*) FROM opportunities 
-                WHERE date(PostedDate) >= date(?)
-                AND date(PostedDate) <= date('now')
-            """, (five_years_ago,))
-            counts['last_5_years'] = cur.fetchone()[0]
-            
-            # All time
+            # All time count
             cur.execute("SELECT COUNT(*) FROM opportunities")
             counts['all_time'] = cur.fetchone()[0]
             
         return counts
         
     except Exception as e:
-        st.warning(f"Error getting period counts: {e}")
-        return {
-            'last_7_days': 0,
-            'last_30_days': 0,
-            'last_year': 0,
-            'last_5_years': 0,
-            'all_time': 0
-        }
+        st.warning(f"Error getting counts: {e}")
+        return {'last_7_days': 0, 'last_30_days': 0, 'last_year': 0,
+               'last_5_years': 0, 'all_time': 0}
 
 @st.cache_data(ttl=300)
-def load_data_by_period(days: Optional[int] = None, limit: int = 100000) -> pd.DataFrame:
-    """Load data for specific time period - FIXED DATE HANDLING"""
+def load_data_by_period(days: int = None, limit: int = 100000) -> pd.DataFrame:
+    """Load data for specific time period using normalized dates"""
     try:
         system = init_system()
         if not system:
             return pd.DataFrame()
         
-        if days is not None:
-            # Calculate the cutoff date
-            cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
-            
-            query = """
-                SELECT 
-                    NoticeID, Title, "Department/Ind.Agency" as Department,
-                    PopCountry, CountryCode, PostedDate, Type,
-                    AwardNumber, AwardDate, "Award$" as AwardAmount,
-                    Awardee, Link, Description,
-                    PrimaryContactTitle, PrimaryContactFullName,
-                    PrimaryContactEmail, PrimaryContactPhone,
-                    OrganizationType, "Sub-Tier" as SubTier, Office
-                FROM opportunities
-                WHERE date(PostedDate) >= date(?)
-                AND date(PostedDate) <= date('now')
-                ORDER BY PostedDate DESC
-                LIMIT ?
-            """
-            params = (cutoff_date, limit)
-        else:
-            # All data
-            query = """
-                SELECT 
-                    NoticeID, Title, "Department/Ind.Agency" as Department,
-                    PopCountry, CountryCode, PostedDate, Type,
-                    AwardNumber, AwardDate, "Award$" as AwardAmount,
-                    Awardee, Link, Description,
-                    PrimaryContactTitle, PrimaryContactFullName,
-                    PrimaryContactEmail, PrimaryContactPhone,
-                    OrganizationType, "Sub-Tier" as SubTier, Office
-                FROM opportunities
-                ORDER BY PostedDate DESC
-                LIMIT ?
-            """
-            params = (limit,)
-        
-        with system.db_manager.get_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=params)
-        
-        # Parse dates with better error handling
-        if not df.empty and 'PostedDate' in df.columns:
-            # First, try to parse the dates
-            try:
-                # Remove any timezone info and handle various date formats
-                df['PostedDate_parsed'] = pd.to_datetime(
-                    df['PostedDate'], 
-                    errors='coerce',
-                    format='mixed',  # Handle mixed formats
-                    dayfirst=False
-                )
-                
-                # If PostedDate_parsed has timezone info, remove it
-                if hasattr(df['PostedDate_parsed'], 'dt'):
-                    if hasattr(df['PostedDate_parsed'].dt, 'tz'):
-                        df['PostedDate_parsed'] = df['PostedDate_parsed'].dt.tz_localize(None)
-            except Exception as e:
-                # Fallback: treat PostedDate as string for display
-                st.warning(f"Date parsing warning: {e}")
-                df['PostedDate_parsed'] = pd.NaT
-        
-        return df
-        
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        st.info("This might be a temporary issue. Try refreshing the page.")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def check_for_updates() -> Tuple[bool, str]:
-    """Check if database has today's data"""
-    try:
-        system = init_system()
-        if not system:
-            return False, "System not initialized"
-        
         with system.db_manager.get_connection() as conn:
             cur = conn.cursor()
             
-            # Get the most recent PostedDate
-            cur.execute("""
-                SELECT MAX(PostedDate) FROM opportunities
-                WHERE PostedDate IS NOT NULL
-            """)
+            # Check if PostedDate_normalized exists
+            cur.execute("PRAGMA table_info(opportunities)")
+            columns = {row[1] for row in cur.fetchall()}
+            has_normalized = 'PostedDate_normalized' in columns
             
-            result = cur.fetchone()
-            if result and result[0]:
-                try:
-                    last_date = pd.to_datetime(result[0])
-                    today = pd.Timestamp.now().normalize()
+            if has_normalized:
+                # Use normalized dates for accurate filtering
+                if days is not None:
+                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+                    today = datetime.now().date().isoformat()
                     
-                    # Check if we have today's data
-                    if last_date.date() >= today.date():
-                        return True, f"Data is current (last update: {last_date.strftime('%Y-%m-%d')})"
-                    else:
-                        days_behind = (today - last_date).days
-                        return False, f"Data is {days_behind} days behind (last update: {last_date.strftime('%Y-%m-%d')})"
-                except:
-                    return False, "Unable to parse last update date"
-            else:
-                return False, "No data in database"
+                    query = """
+                        SELECT 
+                            NoticeID, Title, "Department/Ind.Agency" as Department,
+                            PopCountry, CountryCode, PostedDate, 
+                            PostedDate_normalized, Type,
+                            AwardNumber, AwardDate, "Award$" as AwardAmount,
+                            Awardee, Link, Description,
+                            PrimaryContactTitle, PrimaryContactFullName,
+                            PrimaryContactEmail, PrimaryContactPhone,
+                            OrganizationType, "Sub-Tier" as SubTier, Office
+                        FROM opportunities
+                        WHERE PostedDate_normalized >= ?
+                        AND PostedDate_normalized <= ?
+                        ORDER BY PostedDate_normalized DESC
+                        LIMIT ?
+                    """
+                    df = pd.read_sql_query(query, conn, params=(cutoff_date, today, limit))
+                else:
+                    # All data
+                    query = """
+                        SELECT 
+                            NoticeID, Title, "Department/Ind.Agency" as Department,
+                            PopCountry, CountryCode, PostedDate,
+                            PostedDate_normalized, Type,
+                            AwardNumber, AwardDate, "Award$" as AwardAmount,
+                            Awardee, Link, Description,
+                            PrimaryContactTitle, PrimaryContactFullName,
+                            PrimaryContactEmail, PrimaryContactPhone,
+                            OrganizationType, "Sub-Tier" as SubTier, Office
+                        FROM opportunities
+                        ORDER BY PostedDate_normalized DESC
+                        LIMIT ?
+                    """
+                    df = pd.read_sql_query(query, conn, params=(limit,))
                 
+                # Parse normalized dates
+                if not df.empty and 'PostedDate_normalized' in df.columns:
+                    df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate_normalized'], errors='coerce')
+                
+            else:
+                # Fallback: use original PostedDate
+                st.warning("Please run 'python download_and_update.py' to enable proper date filtering")
+                
+                if days is not None:
+                    cutoff_date = (datetime.now().date() - timedelta(days=days)).isoformat()
+                    query = """
+                        SELECT * FROM opportunities
+                        WHERE date(PostedDate) >= date(?)
+                        ORDER BY PostedDate DESC
+                        LIMIT ?
+                    """
+                    df = pd.read_sql_query(query, conn, params=(cutoff_date, limit))
+                else:
+                    query = "SELECT * FROM opportunities ORDER BY PostedDate DESC LIMIT ?"
+                    df = pd.read_sql_query(query, conn, params=(limit,))
+                
+                # Try to parse dates
+                if not df.empty and 'PostedDate' in df.columns:
+                    df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
+            
+            return df
+            
     except Exception as e:
-        return False, f"Error checking: {e}"
+        st.error(f"Error loading data: {e}")
+        return pd.DataFrame()
 
 # Visualization functions
 def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Figure:
@@ -244,7 +207,7 @@ def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Fig
     if df.empty:
         return go.Figure()
     
-    # Extract ISO codes and aggregate
+    # Extract ISO codes
     df['iso3'] = df['PopCountry'].apply(
         lambda x: x.split('(')[-1].rstrip(')') if '(' in str(x) else None
     )
@@ -252,7 +215,6 @@ def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Fig
     summary = df.groupby('iso3').size().reset_index(name='Opportunities')
     summary = summary[summary['iso3'].notna()]
     
-    # Create choropleth map
     fig = px.choropleth(
         summary,
         locations='iso3',
@@ -261,7 +223,6 @@ def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Fig
         hover_name='iso3',
         color_continuous_scale='Viridis',
         title=f'Contract Opportunities by Country {title_suffix}',
-        labels={'Opportunities': 'Number of Opportunities'}
     )
     
     fig.update_geos(
@@ -269,557 +230,167 @@ def create_map_visualization(df: pd.DataFrame, title_suffix: str = "") -> go.Fig
         showcoastlines=True,
         coastlinecolor='RebeccaPurple',
         showland=True,
-        landcolor='LightGray',
-        showcountries=True,
-        countrycolor='White'
+        landcolor='LightGray'
     )
     
-    fig.update_layout(
-        height=500,
-        margin=dict(t=30, b=0, l=0, r=0)
-    )
-    
+    fig.update_layout(height=500, margin=dict(t=30, b=0, l=0, r=0))
     return fig
 
-def create_timeline_chart(df: pd.DataFrame, title: str = "Daily Contract Postings") -> go.Figure:
-    """Create timeline chart of opportunities"""
-    if df.empty:
+def create_timeline_chart(df: pd.DataFrame, title: str) -> go.Figure:
+    """Create timeline chart"""
+    if df.empty or 'PostedDate_parsed' not in df.columns:
         return go.Figure()
     
-    # Check if PostedDate_parsed exists and has valid data
-    if 'PostedDate_parsed' not in df.columns:
-        # Try to use PostedDate directly
-        if 'PostedDate' in df.columns:
-            try:
-                df['PostedDate_parsed'] = pd.to_datetime(df['PostedDate'], errors='coerce')
-            except:
-                return go.Figure()
-    
-    # Filter out invalid dates
-    valid_dates_df = df[df['PostedDate_parsed'].notna()]
-    
-    if valid_dates_df.empty:
+    valid_dates = df[df['PostedDate_parsed'].notna()]
+    if valid_dates.empty:
         return go.Figure()
     
-    # Group by date
-    try:
-        timeline = valid_dates_df.groupby(valid_dates_df['PostedDate_parsed'].dt.date).size().reset_index()
-        timeline.columns = ['Date', 'Count']
-        
-        fig = px.line(
-            timeline,
-            x='Date',
-            y='Count',
-            title=title,
-            labels={'Count': 'Number of Contracts', 'Date': 'Posted Date'}
-        )
-        
-        fig.update_traces(mode='lines+markers')
-        fig.update_layout(
-            height=300,
-            margin=dict(t=30, b=0, l=0, r=0),
-            showlegend=False
-        )
-        
-        return fig
-    except Exception as e:
-        st.warning(f"Could not create timeline chart: {e}")
-        return go.Figure()
-
-def create_agency_chart(df: pd.DataFrame) -> go.Figure:
-    """Create agency distribution chart"""
-    if df.empty:
-        return go.Figure()
+    timeline = valid_dates.groupby(valid_dates['PostedDate_parsed'].dt.date).size().reset_index()
+    timeline.columns = ['Date', 'Count']
     
-    top_agencies = df.groupby('Department').size().nlargest(15).reset_index()
-    top_agencies.columns = ['Agency', 'Count']
-    
-    fig = px.bar(
-        top_agencies,
-        x='Count',
-        y='Agency',
-        orientation='h',
-        title='Top 15 Agencies by Opportunity Count',
-        labels={'Count': 'Number of Opportunities', 'Agency': ''}
-    )
-    
-    fig.update_layout(
-        height=400,
-        margin=dict(t=30, b=0, l=0, r=0),
-        yaxis={'categoryorder': 'total ascending'}
-    )
-    
+    fig = px.line(timeline, x='Date', y='Count', title=title)
+    fig.update_traces(mode='lines+markers')
+    fig.update_layout(height=300, margin=dict(t=30, b=0, l=0, r=0))
     return fig
 
-def display_period_content(df: pd.DataFrame, period_name: str, period_description: str):
+def display_period_content(df: pd.DataFrame, period_name: str):
     """Display content for a specific time period"""
     
-    # Debug info - show what data we have
     if df.empty:
-        st.warning(f"No data available for {period_description}")
+        st.warning(f"No data available for {period_name}")
         return
     
-    # Filter controls in sidebar
-    with st.sidebar:
-        st.subheader(f"🔍 {period_name} Filters")
-        
-        # Country filter
-        countries = sorted(df['PopCountry'].dropna().unique())
-        selected_country = st.selectbox(
-            f"Country ({period_name})",
-            ["All Countries"] + list(countries),
-            index=0,
-            key=f"country_{period_name}"
-        )
-        
-        # Agency filter
-        agencies = sorted(df['Department'].dropna().unique())
-        selected_agency = st.selectbox(
-            f"Agency ({period_name})",
-            ["All Agencies"] + list(agencies)[:50],
-            index=0,
-            key=f"agency_{period_name}"
-        )
-    
-    # Apply filters
-    filtered_df = df.copy()
-    
-    if selected_country != "All Countries":
-        filtered_df = filtered_df[filtered_df['PopCountry'] == selected_country]
-    
-    if selected_agency != "All Agencies":
-        filtered_df = filtered_df[filtered_df['Department'] == selected_agency]
-    
-    # Display metrics
+    # Metrics
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
-        st.metric("Total Opportunities", f"{len(filtered_df):,}")
-    
+        st.metric("Total Opportunities", f"{len(df):,}")
     with col2:
-        unique_countries = filtered_df['PopCountry'].nunique()
-        st.metric("Countries", f"{unique_countries}")
-    
+        st.metric("Countries", f"{df['PopCountry'].nunique()}")
     with col3:
-        unique_agencies = filtered_df['Department'].nunique()
-        st.metric("Agencies", f"{unique_agencies}")
-    
+        st.metric("Agencies", f"{df['Department'].nunique()}")
     with col4:
-        if not filtered_df.empty:
-            # Try to get latest date
-            try:
-                if 'PostedDate_parsed' in filtered_df.columns and filtered_df['PostedDate_parsed'].notna().any():
-                    latest_date = filtered_df['PostedDate_parsed'].max()
-                    if pd.notna(latest_date):
-                        st.metric("Latest Post", latest_date.strftime("%Y-%m-%d"))
-                    else:
-                        st.metric("Latest Post", filtered_df['PostedDate'].max()[:10] if 'PostedDate' in filtered_df.columns else "N/A")
-                else:
-                    st.metric("Latest Post", filtered_df['PostedDate'].max()[:10] if 'PostedDate' in filtered_df.columns else "N/A")
-            except:
-                st.metric("Latest Post", "N/A")
+        if 'PostedDate_parsed' in df.columns and df['PostedDate_parsed'].notna().any():
+            latest = df['PostedDate_parsed'].max()
+            st.metric("Latest Post", latest.strftime("%Y-%m-%d") if pd.notna(latest) else "N/A")
         else:
             st.metric("Latest Post", "N/A")
     
-    # Create sub-tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs(["📍 Map View", "📈 Trends", "🏢 Agencies", "📋 Data Table"])
+    # Tabs
+    tab1, tab2, tab3 = st.tabs(["📍 Map View", "📈 Trends", "📋 Data Table"])
     
     with tab1:
-        st.subheader(f"Geographic Distribution - {period_description}")
-        
-        if not filtered_df.empty:
-            map_fig = create_map_visualization(filtered_df, f"({period_description})")
+        if not df.empty:
+            map_fig = create_map_visualization(df, f"({period_name})")
             st.plotly_chart(map_fig, use_container_width=True)
             
-            # Top countries table
-            st.subheader("Top Countries by Opportunity Count")
-            country_counts = filtered_df['PopCountry'].value_counts().head(10)
-            
-            col1, col2 = st.columns([2, 3])
-            
-            with col1:
-                # FIX: Properly create the dataframe from value_counts
-                country_df = pd.DataFrame({
-                    'Country': country_counts.index,
-                    'Opportunities': country_counts.values
-                })
-                
-                st.dataframe(
-                    country_df,
-                    hide_index=True,
-                    use_container_width=True
-                )
-            
-            with col2:
-                if not country_counts.empty:
-                    fig = px.pie(
-                        values=country_counts.values,
-                        names=country_counts.index,
-                        title="Distribution by Country"
+            # Top countries
+            country_counts = df['PopCountry'].value_counts().head(10)
+            if not country_counts.empty:
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    st.dataframe(
+                        pd.DataFrame({
+                            'Country': country_counts.index,
+                            'Count': country_counts.values
+                        }),
+                        hide_index=True
                     )
-                    fig.update_traces(textposition='inside', textinfo='percent+label')
+                with col2:
+                    fig = px.pie(values=country_counts.values, names=country_counts.index)
                     fig.update_layout(showlegend=False, height=300)
                     st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info(f"No data available for {period_description}")
     
     with tab2:
-        st.subheader(f"Temporal Trends - {period_description}")
-        
-        if not filtered_df.empty:
-            timeline_fig = create_timeline_chart(
-                filtered_df, 
-                f"Daily Contract Postings - {period_description}"
-            )
+        if not df.empty and 'PostedDate_parsed' in df.columns:
+            timeline_fig = create_timeline_chart(df, f"Daily Postings - {period_name}")
             st.plotly_chart(timeline_fig, use_container_width=True)
-            
-            # Monthly summary - with better date handling
-            st.subheader("Monthly Summary")
-            
-            try:
-                monthly = filtered_df.copy()
-                if 'PostedDate_parsed' in monthly.columns and monthly['PostedDate_parsed'].notna().any():
-                    valid_dates = monthly[monthly['PostedDate_parsed'].notna()]
-                    if not valid_dates.empty:
-                        valid_dates['Month'] = valid_dates['PostedDate_parsed'].dt.to_period('M')
-                        monthly_summary = valid_dates.groupby('Month').agg({
-                            'NoticeID': 'count',
-                            'PopCountry': 'nunique',
-                            'Department': 'nunique'
-                        }).reset_index()
-                        monthly_summary.columns = ['Month', 'Opportunities', 'Countries', 'Agencies']
-                        monthly_summary['Month'] = monthly_summary['Month'].astype(str)
-                        
-                        st.dataframe(
-                            monthly_summary.sort_values('Month', ascending=False).head(12),
-                            hide_index=True,
-                            use_container_width=True
-                        )
-                    else:
-                        st.info("No valid dates for monthly summary")
-                else:
-                    st.info("Date information not available for monthly summary")
-            except Exception as e:
-                st.info(f"Could not create monthly summary")
-        else:
-            st.info(f"No temporal data available for {period_description}")
     
     with tab3:
-        st.subheader(f"Agency Analysis - {period_description}")
+        # Display table
+        display_cols = ['PostedDate', 'Title', 'Department', 'PopCountry', 'Type']
+        display_df = df[display_cols].head(100) if not df.empty else pd.DataFrame()
         
-        if not filtered_df.empty:
-            agency_fig = create_agency_chart(filtered_df)
-            st.plotly_chart(agency_fig, use_container_width=True)
-            
-            # Agency statistics table
-            st.subheader("Agency Statistics")
-            
-            agency_stats = filtered_df.groupby('Department').agg({
-                'NoticeID': 'count',
-                'PopCountry': lambda x: len(x.unique()),
-                'PostedDate': 'max'
-            }).reset_index()
-            agency_stats.columns = ['Agency', 'Opportunities', 'Countries', 'Last Post']
-            agency_stats = agency_stats.sort_values('Opportunities', ascending=False).head(20)
-            
-            st.dataframe(
-                agency_stats,
-                hide_index=True,
-                use_container_width=True
-            )
-        else:
-            st.info(f"No agency data available for {period_description}")
-    
-    with tab4:
-        st.subheader(f"Detailed Contract Data - {period_description}")
-        
-        if not filtered_df.empty:
-            # Display controls
-            col1, col2 = st.columns([3, 1])
-            
-            with col1:
-                search_term = st.text_input(
-                    "Search in titles and descriptions",
-                    placeholder="Enter keywords...",
-                    key=f"search_{period_name}"
-                )
-            
-            with col2:
-                show_count = st.selectbox(
-                    "Show rows",
-                    [25, 50, 100, 200],
-                    index=1,
-                    key=f"show_{period_name}"
-                )
-            
-            # Apply search filter
-            display_df = filtered_df.copy()
-            
-            if search_term:
-                mask = (
-                    display_df['Title'].str.contains(search_term, case=False, na=False) |
-                    display_df['Description'].str.contains(search_term, case=False, na=False)
-                )
-                display_df = display_df[mask]
-            
-            # Prepare display columns
-            display_cols = [
-                'PostedDate', 'Title', 'Department', 'PopCountry',
-                'Type', 'Link'
-            ]
-            
-            # Ensure columns exist
-            for col in display_cols:
-                if col not in display_df.columns:
-                    display_df[col] = ''
-            
-            # Sort and limit
-            display_df = display_df.sort_values('PostedDate', ascending=False).head(show_count)
-            
-            # Create clickable links
-            if 'Link' in display_df.columns:
-                display_df['Link'] = display_df['Link'].apply(
-                    lambda x: f'<a href="{x}" target="_blank">View on SAM.gov</a>' 
-                    if x and str(x) != 'nan' else ''
-                )
-            
-            # Display table
-            st.markdown(
-                display_df[display_cols].to_html(escape=False, index=False),
-                unsafe_allow_html=True
-            )
+        if not display_df.empty:
+            st.dataframe(display_df, hide_index=True, use_container_width=True)
             
             # Download button
-            csv = filtered_df.to_csv(index=False)
+            csv = df.to_csv(index=False)
             st.download_button(
-                label="📥 Download as CSV",
-                data=csv,
-                file_name=f"sam_africa_{period_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-                key=f"download_{period_name}"
+                "📥 Download CSV",
+                csv,
+                f"sam_africa_{period_name.lower().replace(' ', '_')}.csv",
+                "text/csv"
             )
-        else:
-            st.info(f"No data available for {period_description}")
 
 # Main dashboard
 def main():
     """Main dashboard application"""
     
-    # Initialize
     system = init_system()
-    
     if not system:
-        st.error("❌ Failed to initialize the system")
-        st.info("Please check that all required files are present in the repository")
+        st.error("❌ Failed to initialize system")
         st.stop()
     
-    # Header
     st.title("🌍 SAM.gov Africa Contract Opportunities Dashboard")
-    st.markdown("*Real-time tracking of U.S. government contracting opportunities in African countries*")
+    st.markdown("*Tracking U.S. government contracting opportunities in African countries*")
     
     # Sidebar
     with st.sidebar:
         st.header("📊 Dashboard Controls")
         
-        # Data refresh button
-        if st.button("🔄 Trigger Data Update", use_container_width=True):
-            # Check if data is already up to date
-            is_current, message = check_for_updates()
-            
-            if is_current:
-                st.info(f"📊 Data is Currently Up-To-Date\n\n{message}")
-            else:
-                # Clear caches
-                st.cache_data.clear()
-                
-                # Trigger GitHub Action if configured
-                github_token = st.secrets.get("github_token", "")
-                if github_token:
-                    import requests
-                    owner = st.secrets.get("github_owner", "JWKSOA")
-                    repo = st.secrets.get("github_repo", "SAM.gov-Africa-Dashboard")
-                    workflow = st.secrets.get("github_workflow", "update-sam-db.yml")
-                    
-                    url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches"
-                    headers = {
-                        "Authorization": f"Bearer {github_token}",
-                        "Accept": "application/vnd.github+json"
-                    }
-                    
-                    # Add inputs to ensure only incremental update
-                    payload = {
-                        "ref": "main",
-                        "inputs": {
-                            "run_bootstrap": "false",
-                            "cleanup_old": "false"
-                        }
-                    }
-                    
-                    try:
-                        response = requests.post(
-                            url, 
-                            headers=headers, 
-                            json=payload, 
-                            timeout=10
-                        )
-                        if response.status_code in (201, 204):
-                            st.success(f"✅ Update triggered!\n\n{message}\n\nCheck GitHub Actions for progress.")
-                        else:
-                            st.error(f"❌ Failed: {response.status_code}")
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
-                else:
-                    st.info("ℹ️ Configure github_token in secrets to enable updates")
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
         
         st.divider()
         
-        # Load period counts
+        # Statistics
         period_counts = get_period_counts()
         
-        st.subheader("📊 Contract Statistics")
+        st.subheader("📊 Statistics")
+        st.metric("Last 7 Days", f"{period_counts['last_7_days']:,}")
+        st.metric("Last 30 Days", f"{period_counts['last_30_days']:,}")
+        st.metric("Last Year", f"{period_counts['last_year']:,}")
+        st.metric("Last 5 Years", f"{period_counts['last_5_years']:,}")
+        st.metric("All Time", f"{period_counts['all_time']:,}")
         
-        # Display statistics for each period
-        st.metric(
-            "Last 7 Days",
-            f"{period_counts['last_7_days']:,} contracts"
-        )
-        
-        st.metric(
-            "Last 30 Days",
-            f"{period_counts['last_30_days']:,} contracts"
-        )
-        
-        st.metric(
-            "Last Year",
-            f"{period_counts['last_year']:,} contracts"
-        )
-        
-        st.metric(
-            "Last 5 Years",
-            f"{period_counts['last_5_years']:,} contracts"
-        )
-        
-        st.metric(
-            "All Time Total",
-            f"{period_counts['all_time']:,} contracts",
-            help="Total contracts for African countries to date"
-        )
-        
-        # Database info
         st.divider()
-        
-        try:
-            stats = system.db_manager.get_statistics()
-            st.metric("Database Size", f"{stats['size_mb']:.1f} MB")
-            
-            unique_countries = len([c for c in stats['by_country'] if stats['by_country'][c] > 0])
-            st.metric("Active Countries", f"{unique_countries}/54")
-        except:
-            pass
-        
-        # Info section
-        st.divider()
-        st.subheader("ℹ️ About")
         st.markdown("""
-        This dashboard tracks U.S. government contract opportunities
-        posted on SAM.gov that involve African countries.
-        
-        **Data Sources:**
-        - Current: SAM.gov daily extract
-        - Historical: FY1998-present archives
-        
-        **Updates:**
-        - Automated daily at 04:30 UTC
-        - Manual refresh available
+        **Data Source:** SAM.gov  
+        **Updates:** Daily at midnight  
+        **Coverage:** All 54 African countries
         """)
     
-    # Main content area - Time Period Tabs
-    st.divider()
-    
-    # Create main tabs for different time periods
-    tab_7days, tab_30days, tab_1year, tab_5years, tab_archive = st.tabs([
+    # Main tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📅 Last 7 Days",
-        "📅 Last 30 Days", 
+        "📅 Last 30 Days",
         "📅 Last Year",
         "📅 Last 5 Years",
         "🗃️ Archive (All Time)"
     ])
     
-    with tab_7days:
-        df_7days = load_data_by_period(days=7)
-        st.info(f"Found {len(df_7days)} contracts in the last 7 days")
-        if not df_7days.empty:
-            display_period_content(df_7days, "Last 7 Days", "Past Week")
-        else:
-            st.warning("No contracts posted in the last 7 days. This is normal - new contracts are posted periodically.")
+    with tab1:
+        df = load_data_by_period(days=7)
+        display_period_content(df, "Last 7 Days")
     
-    with tab_30days:
-        df_30days = load_data_by_period(days=30)
-        st.info(f"Found {len(df_30days)} contracts in the last 30 days")
-        if not df_30days.empty:
-            display_period_content(df_30days, "Last 30 Days", "Past Month")
-        else:
-            st.warning("No contracts found for the last 30 days.")
+    with tab2:
+        df = load_data_by_period(days=30)
+        display_period_content(df, "Last 30 Days")
     
-    with tab_1year:
-        df_1year = load_data_by_period(days=365)
-        st.info(f"Found {len(df_1year)} contracts in the last year")
-        if not df_1year.empty:
-            display_period_content(df_1year, "Last Year", "Past Year")
-        else:
-            st.warning("No contracts found for the last year.")
+    with tab3:
+        df = load_data_by_period(days=365)
+        display_period_content(df, "Last Year")
     
-    with tab_5years:
-        df_5years = load_data_by_period(days=1825)  # 365 * 5
-        st.info(f"Found {len(df_5years)} contracts in the last 5 years")
-        if not df_5years.empty:
-            display_period_content(df_5years, "Last 5 Years", "Past 5 years")
-        else:
-            st.warning("No contracts found for the last 5 years.")
+    with tab4:
+        df = load_data_by_period(days=1825)
+        display_period_content(df, "Last 5 Years")
     
-    with tab_archive:
-        df_archive = load_data_by_period(days=None)  # All data
-        
-        # Display archive summary first
-        if not df_archive.empty:
-            st.info(f"""
-            📚 **Archive Contains All Historical Data**
-            - Total Records: {len(df_archive):,}
-            - Date Range: {df_archive['PostedDate'].min() if not df_archive.empty else 'N/A'} to {df_archive['PostedDate'].max() if not df_archive.empty else 'N/A'}
-            - This includes all data from FY1998 to present
-            """)
-            
-            display_period_content(df_archive, "Archive", "All Time")
-        else:
-            st.error("No data available in archive. Please check database connection.")
-    
-    # Footer
-    st.divider()
-    
-    with st.expander("📊 System Information"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown(f"""
-            **Database Location:** `{system.config.db_path}`  
-            **Total Records:** {period_counts.get('all_time', 0):,}  
-            """)
-            
-            try:
-                stats = system.db_manager.get_statistics()
-                st.markdown(f"**Database Size:** {stats.get('size_mb', 0):.1f} MB")
-            except:
-                pass
-        
-        with col2:
-            st.markdown("**Top 5 Countries:**")
-            try:
-                stats = system.db_manager.get_statistics()
-                if 'by_country' in stats:
-                    for country, count in list(stats['by_country'].items())[:5]:
-                        st.markdown(f"- {country}: {count:,}")
-            except:
-                st.markdown("*Unable to load country statistics*")
+    with tab5:
+        df = load_data_by_period(days=None)
+        if not df.empty:
+            st.info(f"📚 Archive contains {len(df):,} total records from all time")
+        display_period_content(df, "All Time")
 
 if __name__ == "__main__":
     main()

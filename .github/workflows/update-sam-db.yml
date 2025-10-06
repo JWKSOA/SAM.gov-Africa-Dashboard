@@ -2,19 +2,15 @@ name: Update SAM.gov Database
 
 on:
   schedule:
-    # Run once daily at 04:30 UTC (handles DST automatically)
-    - cron: "30 4 * * *"
+    # Run daily at midnight EST (5 AM UTC)
+    - cron: "0 5 * * *"
   
   workflow_dispatch:
     inputs:
-      run_bootstrap:
-        description: "Run full historical bootstrap"
+      lookback_days:
+        description: "Number of days to look back"
         required: false
-        default: "false"
-      cleanup_old:
-        description: "Remove records older than 5 years"
-        required: false
-        default: "false"
+        default: "7"
 
 permissions:
   contents: write
@@ -25,16 +21,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     
-    env:
-      SAM_DATA_DIR: ${{ github.workspace }}/data
-      PYTHONUNBUFFERED: "1"
-    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          lfs: false  # We'll handle LFS manually if needed
+          lfs: true  # Important: Fetch LFS files
+      
+      - name: Setup Git LFS
+        run: |
+          git lfs install
+          git lfs pull
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,188 +41,108 @@ jobs:
       
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip wheel
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Ensure data directory
+      - name: Create data directory if needed
         run: mkdir -p data
       
-      - name: Check database size
-        id: check-size
+      - name: Check database status
+        id: check-db
         run: |
           if [ -f data/opportunities.db ]; then
-            SIZE=$(stat -c%s data/opportunities.db 2>/dev/null || stat -f%z data/opportunities.db)
-            SIZE_MB=$((SIZE / 1048576))
-            echo "Database size: ${SIZE_MB} MB"
-            echo "db_size_mb=${SIZE_MB}" >> $GITHUB_OUTPUT
+            # Check if it's a real database or LFS pointer
+            FILE_SIZE=$(stat -c%s data/opportunities.db 2>/dev/null || stat -f%z data/opportunities.db)
+            echo "Database file size: $FILE_SIZE bytes"
             
-            # Setup Git LFS if database is large
-            if [ $SIZE_MB -gt 50 ]; then
-              echo "Database > 50MB, using Git LFS"
-              git lfs install
-              git lfs track "*.db"
-              git add .gitattributes || true
-              echo "use_lfs=true" >> $GITHUB_OUTPUT
-            else
-              echo "use_lfs=false" >> $GITHUB_OUTPUT
+            if [ $FILE_SIZE -lt 1000 ]; then
+              echo "Database is LFS pointer, pulling actual file..."
+              git lfs pull --include="data/opportunities.db"
             fi
+            
+            # Verify it's a valid SQLite database
+            python -c "
+import sqlite3
+try:
+    conn = sqlite3.connect('data/opportunities.db')
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM opportunities')
+    count = cur.fetchone()[0]
+    print(f'Database contains {count:,} records')
+    conn.close()
+except Exception as e:
+    print(f'Database check failed: {e}')
+    exit(1)
+            "
           else
-            echo "Database not found"
-            echo "db_size_mb=0" >> $GITHUB_OUTPUT
-            echo "use_lfs=false" >> $GITHUB_OUTPUT
+            echo "No database found, will create new one"
           fi
       
-      # ONLY run bootstrap if explicitly requested OR if database doesn't exist
-      - name: Run historical bootstrap (ONLY if requested or first run)
-        if: github.event.inputs.run_bootstrap == 'true' || steps.check-size.outputs.db_size_mb == '0'
+      - name: Run daily update
         run: |
-          echo "Running historical bootstrap..."
-          python bootstrap_historical.py
-        continue-on-error: false
+          echo "Running incremental update..."
+          python download_and_update.py --lookback-days ${{ github.event.inputs.lookback_days || '7' }}
       
-      # ALWAYS run incremental update (unless bootstrap was just run)
-      - name: Run daily incremental update
-        if: github.event.inputs.run_bootstrap != 'true'
-        run: |
-          echo "Running daily incremental update (NEW DATA ONLY)..."
-          if [ "${{ github.event.inputs.cleanup_old }}" == "true" ]; then
-            python download_and_update.py --cleanup --lookback-days 7
-          else
-            # Only look back 7 days for new data
-            python download_and_update.py --lookback-days 7
-          fi
-        continue-on-error: false
-      
-      - name: Clean database of non-African countries
-        run: |
-          echo "Cleaning non-African countries from database..."
-          python cleanup_database.py || echo "Cleanup script not found or failed"
-        continue-on-error: true
-      
-      - name: Verify database integrity
+      - name: Verify update
         run: |
           python -c "
-          import sqlite3
-          import sys
-          from pathlib import Path
-          
-          db_path = Path('data/opportunities.db')
-          if not db_path.exists():
-              print('ERROR: Database not found after update')
-              sys.exit(1)
-          
-          conn = sqlite3.connect(db_path)
-          cur = conn.cursor()
-          
-          # Check integrity
-          cur.execute('PRAGMA integrity_check')
-          result = cur.fetchone()[0]
-          if result != 'ok':
-              print(f'ERROR: Database integrity check failed: {result}')
-              sys.exit(1)
-          
-          # Get statistics
-          cur.execute('SELECT COUNT(*) FROM opportunities')
-          count = cur.fetchone()[0]
-          print(f'Database contains {count:,} records')
-          
-          # Check for recent data
-          cur.execute('''
-              SELECT COUNT(*) FROM opportunities 
-              WHERE datetime(PostedDate) >= datetime('now', '-7 days')
-          ''')
-          recent = cur.fetchone()[0]
-          print(f'Recent records (7 days): {recent:,}')
-          
-          # Show top countries
-          cur.execute('''
-              SELECT PopCountry, COUNT(*) as cnt
-              FROM opportunities
-              WHERE PopCountry IS NOT NULL
-              GROUP BY PopCountry
-              ORDER BY cnt DESC
-              LIMIT 5
-          ''')
-          print('\\nTop 5 Countries:')
-          for country, cnt in cur.fetchall():
-              print(f'  {country}: {cnt:,}')
-          
-          conn.close()
-          
-          if count == 0:
-              print('ERROR: Database is empty')
-              sys.exit(1)
+import sqlite3
+from datetime import datetime, timedelta
+
+conn = sqlite3.connect('data/opportunities.db')
+cur = conn.cursor()
+
+# Check total records
+cur.execute('SELECT COUNT(*) FROM opportunities')
+total = cur.fetchone()[0]
+print(f'Total records: {total:,}')
+
+# Check recent records
+try:
+    cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    cur.execute('''
+        SELECT COUNT(*) FROM opportunities 
+        WHERE PostedDate_normalized >= ?
+    ''', (cutoff,))
+    recent = cur.fetchone()[0]
+    print(f'Records from last 7 days: {recent:,}')
+except:
+    # Fallback if normalized column doesn't exist yet
+    cur.execute('''
+        SELECT COUNT(*) FROM opportunities 
+        WHERE date(PostedDate) >= date('now', '-7 days')
+    ''')
+    recent = cur.fetchone()[0]
+    print(f'Recent records (approx): {recent:,}')
+
+conn.close()
           "
       
-      - name: Clean up temporary files
-        run: |
-          # Remove any CSV files (they shouldn't be committed)
-          find data -name "*.csv" -type f -delete 2>/dev/null || true
-          find data -name "*.zip" -type f -delete 2>/dev/null || true
-          find data -name "*.gz" -type f -delete 2>/dev/null || true
-          
-          # Remove cache files
-          rm -rf data/.cache/* 2>/dev/null || true
-      
-      - name: Commit and push changes
+      - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Add all changes
+          # Track database with Git LFS
+          git lfs track "data/*.db"
+          git add .gitattributes
+          
+          # Add changes
           git add -A
           
           # Check if there are changes
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            # Generate commit message with statistics
-            STATS=$(python -c "
-            import sqlite3
-            from pathlib import Path
-            from datetime import datetime
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+            git commit -m "Update database [$TIMESTAMP]"
             
-            db = Path('data/opportunities.db')
-            if db.exists():
-                conn = sqlite3.connect(db)
-                cur = conn.cursor()
-                cur.execute('SELECT COUNT(*) FROM opportunities')
-                total = cur.fetchone()[0]
-                cur.execute('''
-                    SELECT COUNT(*) FROM opportunities 
-                    WHERE datetime(PostedDate) >= datetime('now', '-1 days')
-                ''')
-                new = cur.fetchone()[0]
-                conn.close()
-                print(f'{total} total, {new} new today')
-            else:
-                print('Database update')
-            ")
-            
-            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-            
-            # Determine update type
-            if [ "${{ github.event.inputs.run_bootstrap }}" == "true" ]; then
-              UPDATE_TYPE="Bootstrap"
-            else
-              UPDATE_TYPE="Incremental"
-            fi
-            
-            git commit -m "Update database [$UPDATE_TYPE] [${TIMESTAMP}] - ${STATS}"
-            
-            # Push with retries
-            for i in {1..3}; do
-              if git push; then
-                echo "Successfully pushed changes"
-                break
-              else
-                echo "Push attempt $i failed, retrying..."
-                sleep 5
-              fi
-            done
+            # Push with LFS
+            git lfs push origin main --all
+            git push origin main
           fi
       
-      - name: Upload artifacts (on failure)
+      - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -234,20 +151,3 @@ jobs:
             *.log
             data/*.log
           retention-days: 7
-      
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "::error::Database update failed. Check the logs for details."
-
-  cleanup-old-artifacts:
-    runs-on: ubuntu-latest
-    needs: update-database
-    if: success()
-    
-    steps:
-      - name: Cleanup old workflow runs
-        uses: GitRML/delete-workflow-runs@main
-        with:
-          retain_days: 30
-          keep_minimum_runs: 5

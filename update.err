@@ -8,3 +8,65 @@ Traceback (most recent call last):
     cur.execute(sql, vals)
     ~~~~~~~~~~~^^^^^^^^^^^
 sqlite3.OperationalError: table opportunities has no column named Sub-Tier
+2025-10-06 09:28:56,000 - sam_utils - INFO - Found valid database at: /Users/jackkozmetsky/sam_africa_data/opportunities.db
+2025-10-06 09:28:56,004 - sam_utils - INFO - Database initialized successfully
+2025-10-06 09:28:56,006 - sam_utils - INFO - ============================================================
+2025-10-06 09:28:56,006 - sam_utils - INFO - SAM.gov Daily Update - Optimized Version
+2025-10-06 09:28:56,007 - sam_utils - INFO - Database: /Users/jackkozmetsky/sam_africa_data/opportunities.db
+2025-10-06 09:28:56,007 - sam_utils - INFO - ============================================================
+2025-10-06 09:28:57,680 - sam_utils - INFO - Initial records: 38,264
+2025-10-06 09:28:57,680 - sam_utils - INFO - Recent records (30d): 0
+2025-10-06 09:28:58,971 - sam_utils - WARNING - Primary URL not available, using fallback
+2025-10-06 09:28:59,197 - sam_utils - INFO - Processing records posted after 2025-09-22
+2025-10-06 09:28:59,201 - sam_utils - INFO - Downloading current opportunities CSV...
+2025-10-06 09:28:59,201 - sam_utils - INFO - Downloading from https://falextracts.s3.amazonaws.com/Contract%20Opportunities/datagov/ContractOpportunitiesFullCSV.csv
+2025-10-06 09:29:00,562 - sam_utils - INFO - Download progress: 5.3%
+2025-10-06 09:29:01,362 - sam_utils - INFO - Download progress: 10.6%
+2025-10-06 09:29:02,148 - sam_utils - INFO - Download progress: 16.0%
+2025-10-06 09:29:02,861 - sam_utils - INFO - Download progress: 21.3%
+2025-10-06 09:29:03,559 - sam_utils - INFO - Download progress: 26.6%
+2025-10-06 09:29:04,249 - sam_utils - INFO - Download progress: 31.9%
+2025-10-06 09:29:04,952 - sam_utils - INFO - Download progress: 37.3%
+2025-10-06 09:29:05,589 - sam_utils - INFO - Download progress: 42.6%
+2025-10-06 09:29:06,279 - sam_utils - INFO - Download progress: 47.9%
+2025-10-06 09:29:06,926 - sam_utils - INFO - Download progress: 53.2%
+2025-10-06 09:29:07,576 - sam_utils - INFO - Download progress: 58.5%
+2025-10-06 09:29:08,224 - sam_utils - INFO - Download progress: 63.9%
+2025-10-06 09:29:08,877 - sam_utils - INFO - Download progress: 69.2%
+2025-10-06 09:29:09,576 - sam_utils - INFO - Download progress: 74.5%
+2025-10-06 09:29:10,210 - sam_utils - INFO - Download progress: 79.8%
+2025-10-06 09:29:10,859 - sam_utils - INFO - Download progress: 85.2%
+2025-10-06 09:29:11,519 - sam_utils - INFO - Download progress: 90.5%
+2025-10-06 09:29:12,159 - sam_utils - INFO - Download progress: 95.8%
+2025-10-06 09:29:12,676 - sam_utils - INFO - Downloaded to /var/folders/g7/rl56lbj978vbkl1z20xw80_c0000gn/T/tmpr5q29vsa/current.csv
+2025-10-06 09:29:12,677 - sam_utils - INFO - Processing CSV chunks...
+2025-10-06 09:29:12,678 - sam_utils - INFO - Reading CSV with encoding=utf-8
+/Users/jackkozmetsky/Desktop/sam-africa-dashboard/download_and_update.py:82: FutureWarning: In a future version of pandas, parsing datetimes with mixed time zones will raise an error unless `utc=True`. Please specify `utc=True` to opt in to the new behaviour and silence this warning. To create a `Series` with mixed offsets and `object` dtype, please use `apply` and `datetime.datetime.strptime`
+  chunk['PostedDate_parsed'] = pd.to_datetime(
+2025-10-06 09:29:16,684 - sam_utils - INFO - Inserted 29 records, skipped 44 duplicates
+/Users/jackkozmetsky/Desktop/sam-africa-dashboard/download_and_update.py:82: FutureWarning: In a future version of pandas, parsing datetimes with mixed time zones will raise an error unless `utc=True`. Please specify `utc=True` to opt in to the new behaviour and silence this warning. To create a `Series` with mixed offsets and `object` dtype, please use `apply` and `datetime.datetime.strptime`
+  chunk['PostedDate_parsed'] = pd.to_datetime(
+2025-10-06 09:29:17,535 - sam_utils - INFO - Inserted 0 records, skipped 29 duplicates
+2025-10-06 09:29:17,542 - sam_utils - INFO - 
+Update complete: 102 African records processed, 29 new inserted, 73 duplicates skipped, 52926 old records skipped
+2025-10-06 09:29:17,831 - sam_utils - INFO - 
+============================================================
+2025-10-06 09:29:17,831 - sam_utils - INFO - Daily Update Complete!
+2025-10-06 09:29:17,832 - sam_utils - INFO - Time elapsed: 0:00:21.825115
+2025-10-06 09:29:17,832 - sam_utils - INFO - New records: 29
+2025-10-06 09:29:17,832 - sam_utils - INFO - Duplicates skipped: 73
+2025-10-06 09:29:17,832 - sam_utils - INFO - Total records: 38,293
+2025-10-06 09:29:17,832 - sam_utils - INFO - Database size: 117.1 MB
+2025-10-06 09:29:17,832 - sam_utils - INFO - 
+New records by country:
+2025-10-06 09:29:17,832 - sam_utils - INFO -   MAURITANIA (MRT): +3
+2025-10-06 09:29:17,832 - sam_utils - INFO -   USA: +4
+2025-10-06 09:29:17,832 - sam_utils - INFO -   nan: +8
+2025-10-06 09:29:17,832 - sam_utils - INFO -   GUINEA (GIN): +4
+2025-10-06 09:29:17,832 - sam_utils - INFO -   EGYPT (EGY): +1
+2025-10-06 09:29:17,832 - sam_utils - INFO -   CENTRAL AFRICAN REPUBLIC (CAF): +3
+2025-10-06 09:29:17,832 - sam_utils - INFO -   ERITREA (ERI): +2
+2025-10-06 09:29:17,832 - sam_utils - INFO -   KENYA (KEN): +1
+2025-10-06 09:29:17,832 - sam_utils - INFO -   ZAMBIA (ZMB): +2
+2025-10-06 09:29:17,832 - sam_utils - INFO -   SIERRA LEONE (SLE): +1
+2025-10-06 09:29:17,832 - sam_utils - INFO - ============================================================

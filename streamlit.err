@@ -22,3 +22,17 @@ Traceback (most recent call last):
   File "/Users/jackkozmetsky/Desktop/sam-africa-dashboard/streamlit_dashboard.py", line 12, in <module>
     import streamlit_authenticator as stauth
 ModuleNotFoundError: No module named 'streamlit_authenticator'
+2025-10-06 09:29:08,357 - sam_utils - INFO - Found valid database at: data/opportunities.db
+2025-10-06 09:29:08,359 - sam_utils - INFO - Database initialized successfully
+/Users/jackkozmetsky/Desktop/sam-africa-dashboard/streamlit_dashboard.py:181: FutureWarning: In a future version of pandas, parsing datetimes with mixed time zones will raise an error unless `utc=True`. Please specify `utc=True` to opt in to the new behaviour and silence this warning. To create a `Series` with mixed offsets and `object` dtype, please use `apply` and `datetime.datetime.strptime`
+  df['PostedDate_parsed'] = pd.to_datetime(
+2025-10-06 09:29:16.471 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2025-10-06 09:29:17.388 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
