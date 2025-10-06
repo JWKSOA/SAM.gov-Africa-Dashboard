@@ -10,7 +10,7 @@ import logging
 import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Tuple
+from typing import Tuple, Optional  # Added Optional here
 
 import pandas as pd
 
